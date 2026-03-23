@@ -629,7 +629,8 @@ where
             });
             // Read request count before remove_tunnel clears the routing entry.
             let request_count = core.get_tunnel_request_count(&tunnel_id);
-            let _ = db::log_tunnel_unregistered(&db.pg, &tunnel_id.to_string(), request_count, 0).await;
+            let _ =
+                db::log_tunnel_unregistered(&db.pg, &tunnel_id.to_string(), request_count, 0).await;
             core.remove_tunnel(&tunnel_id);
         }
 
