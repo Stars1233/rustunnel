@@ -24,11 +24,13 @@ use uuid::Uuid;
 
 use rustunnel_protocol::{decode_frame, encode_frame, ControlFrame, TunnelProtocol};
 
+use chrono::Utc;
+
 use crate::audit::{AuditEvent, AuditTx};
 use crate::config::ServerConfig;
 use crate::control::mux::MuxSession;
 use crate::core::{ControlMessage, TunnelCore};
-use crate::db::{self, Db};
+use crate::db::{self, models::Token, Db};
 use crate::error::{Error, Result};
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -51,7 +53,11 @@ struct SessionCtx<'a> {
     config: &'a Arc<ServerConfig>,
     audit_tx: &'a AuditTx,
     db: &'a Db,
+    /// `tokens.id` string — used for audit log attribution.
     db_token_id: Option<String>,
+    /// Full token record from the DB — used for limit enforcement at RegisterTunnel.
+    /// `None` for admin-token sessions and when auth is disabled.
+    db_token: Option<Token>,
 }
 
 // ── public entry point ────────────────────────────────────────────────────────
@@ -89,8 +95,9 @@ where
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<ControlMessage>(CTRL_CHANNEL_SIZE);
 
     // Auth.
-    let (mut ws, session_id, db_token_id) =
+    let (mut ws, session_id, db_token) =
         auth_handshake(ws, peer_addr, core, config, ctrl_tx, audit_tx, db).await?;
+    let db_token_id = db_token.as_ref().map(|t| t.id.clone());
 
     tracing::info!(%peer_addr, %session_id, "session authenticated");
 
@@ -205,6 +212,7 @@ where
         audit_tx,
         db,
         db_token_id,
+        db_token,
     };
     let result = main_loop(
         &mut ws,
@@ -219,13 +227,19 @@ where
     let _ = hb_stop_tx.send(());
 
     // Mark any tunnels still open at disconnect time as unregistered.
-    let remaining: Vec<String> = core
+    // Collect request counts from the routing table BEFORE remove_session clears them.
+    let remaining: Vec<(String, u64)> = core
         .sessions
         .get(&session_id)
-        .map(|s| s.tunnels.iter().map(|id| id.to_string()).collect())
+        .map(|s| {
+            s.tunnels
+                .iter()
+                .map(|id| (id.to_string(), core.get_tunnel_request_count(id)))
+                .collect()
+        })
         .unwrap_or_default();
-    for tid in &remaining {
-        let _ = db::log_tunnel_unregistered(&db.pg, tid).await;
+    for (tid, request_count) in &remaining {
+        let _ = db::log_tunnel_unregistered(&db.pg, tid, *request_count, 0).await;
     }
 
     core.remove_session(&session_id);
@@ -244,7 +258,7 @@ async fn auth_handshake<S>(
     ctrl_tx: mpsc::Sender<ControlMessage>,
     audit_tx: &AuditTx,
     db: &Db,
-) -> Result<(WebSocketStream<S>, Uuid, Option<String>)>
+) -> Result<(WebSocketStream<S>, Uuid, Option<Token>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -278,30 +292,26 @@ where
         }
     };
 
-    // Resolve auth and capture the DB token ID in one pass to avoid a second
-    // round-trip.  Admin token → None; DB token → Some(token.id).
-    let db_token_id: Option<String>;
+    // Resolve auth and capture the full DB token record for limit enforcement.
+    // Admin token → None; DB token → Some(Token).
+    let db_token: Option<Token>;
     let authed: bool;
 
     if !config.auth.require_auth {
-        // Auth disabled — still try to resolve the DB token ID for tracking.
-        db_token_id = db::verify_token(&db.pg, &token)
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.id);
+        // Auth disabled — still try to resolve the DB token for tracking.
+        db_token = db::verify_token(&db.pg, &token).await.ok().flatten();
         authed = true;
     } else if token == config.auth.admin_token {
-        db_token_id = None;
+        db_token = None;
         authed = true;
     } else {
         match db::verify_token(&db.pg, &token).await {
             Ok(Some(t)) => {
-                db_token_id = Some(t.id);
+                db_token = Some(t);
                 authed = true;
             }
             _ => {
-                db_token_id = None;
+                db_token = None;
                 authed = false;
             }
         }
@@ -324,7 +334,8 @@ where
     }
 
     let token_id = token.clone();
-    let session_id = core.register_session(peer_addr, token, db_token_id.clone(), ctrl_tx);
+    let db_token_id = db_token.as_ref().map(|t| t.id.clone());
+    let session_id = core.register_session(peer_addr, token, db_token_id, ctrl_tx);
 
     let _ = audit_tx.try_send(AuditEvent::AuthAttempt {
         peer: peer_addr.to_string(),
@@ -341,7 +352,7 @@ where
     )
     .await?;
 
-    Ok((ws, session_id, db_token_id))
+    Ok((ws, session_id, db_token))
 }
 
 // ── main loop ─────────────────────────────────────────────────────────────────
@@ -442,6 +453,7 @@ where
         audit_tx,
         db,
         db_token_id,
+        db_token,
     } = ctx;
     let session_id = *session_id;
     let frame = match parse_binary(msg) {
@@ -457,6 +469,61 @@ where
             local_addr: _,
         } => {
             tracing::debug!(%session_id, %request_id, ?protocol, "register tunnel");
+
+            // ── Token limit enforcement ────────────────────────────────────
+            // status is always checked; limit/expiry checks are skipped for
+            // unlimited tokens and for tokens with no user_id (legacy tokens).
+            if let Some(token) = db_token {
+                if token.status != "active" {
+                    send_frame(
+                        ws,
+                        &ControlFrame::TunnelError {
+                            request_id,
+                            message: "token is suspended or revoked".into(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                if !token.unlimited {
+                    if let Some(exp) = token.expires_at {
+                        if Utc::now() > exp {
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelError {
+                                    request_id,
+                                    message: "token has expired".into(),
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
+                    if let (Some(limit), Some(user_id)) = (token.tunnel_limit, token.user_id) {
+                        let row: (i64,) = sqlx::query_as(
+                            "SELECT COUNT(*) FROM tunnel_log \
+                             WHERE user_id = $1 AND unregistered_at IS NULL",
+                        )
+                        .bind(user_id)
+                        .fetch_one(&db.pg)
+                        .await?;
+                        if row.0 >= limit as i64 {
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelError {
+                                    request_id,
+                                    message: format!("tunnel limit of {limit} reached"),
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // ── Registration ───────────────────────────────────────────────
+            let token_user_id = db_token.as_ref().and_then(|t| t.user_id);
             match &protocol {
                 TunnelProtocol::Http | TunnelProtocol::Https => {
                     match core.register_http_tunnel(&session_id, subdomain, protocol.clone()) {
@@ -476,12 +543,15 @@ where
                             });
                             let _ = db::log_tunnel_registered(
                                 &db.pg,
-                                &tunnel_id.to_string(),
-                                &proto_str,
-                                &sub,
-                                &session_id.to_string(),
-                                db_token_id.as_deref(),
-                                &config.region.id,
+                                db::TunnelRegistration {
+                                    tunnel_id: &tunnel_id.to_string(),
+                                    protocol: &proto_str,
+                                    label: &sub,
+                                    session_id: &session_id.to_string(),
+                                    token_id: db_token_id.as_deref(),
+                                    region_id: &config.region.id,
+                                    user_id: token_user_id,
+                                },
                             )
                             .await;
                             send_frame(
@@ -519,12 +589,15 @@ where
                         });
                         let _ = db::log_tunnel_registered(
                             &db.pg,
-                            &tunnel_id.to_string(),
-                            "tcp",
-                            &port_str,
-                            &session_id.to_string(),
-                            db_token_id.as_deref(),
-                            &config.region.id,
+                            db::TunnelRegistration {
+                                tunnel_id: &tunnel_id.to_string(),
+                                protocol: "tcp",
+                                label: &port_str,
+                                session_id: &session_id.to_string(),
+                                token_id: db_token_id.as_deref(),
+                                region_id: &config.region.id,
+                                user_id: token_user_id,
+                            },
                         )
                         .await;
                         send_frame(
@@ -558,7 +631,10 @@ where
                 tunnel_id: tunnel_id.to_string(),
                 label: String::new(),
             });
-            let _ = db::log_tunnel_unregistered(&db.pg, &tunnel_id.to_string()).await;
+            // Read request count before remove_tunnel clears the routing entry.
+            let request_count = core.get_tunnel_request_count(&tunnel_id);
+            let _ =
+                db::log_tunnel_unregistered(&db.pg, &tunnel_id.to_string(), request_count, 0).await;
             core.remove_tunnel(&tunnel_id);
         }
 

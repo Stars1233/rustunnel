@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
@@ -72,6 +72,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tokens", get(list_tokens).post(create_token))
         .route("/api/tokens/:id", delete(delete_token))
         .route("/api/history", get(tunnel_history))
+        // admin-only
+        .route("/api/admin/tokens/:id", patch(admin_patch_token))
         .layer(cors)
         .with_state(state)
 }
@@ -524,6 +526,57 @@ async fn delete_token(
             });
             StatusCode::NO_CONTENT.into_response()
         }
+        Ok(false) => not_found("token not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ── admin routes ──────────────────────────────────────────────────────────────
+
+/// Require the request to carry the admin token (not a DB token).
+async fn require_admin(
+    headers: &HeaderMap,
+    state: &ApiState,
+) -> Result<(), (StatusCode, Json<ErrBody>)> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if auth == state.admin_token {
+        Ok(())
+    } else {
+        Err(unauthorized("admin token required"))
+    }
+}
+
+#[derive(Deserialize)]
+struct PatchTokenBody {
+    unlimited: bool,
+}
+
+/// `PATCH /api/admin/tokens/:id` — toggle the `unlimited` flag on a token.
+///
+/// Requires the admin token. Takes effect on the next tunnel registration
+/// attempt (the per-session token cache is not invalidated).
+async fn admin_patch_token(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchTokenBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+
+    match db::set_token_unlimited(&state.db.pg, &id, body.unlimited).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found("token not found").into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

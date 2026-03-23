@@ -262,6 +262,24 @@ impl TunnelCore {
         }
     }
 
+    /// Return the current proxied-request count for a tunnel without removing it.
+    /// Returns 0 if the tunnel is unknown.
+    pub fn get_tunnel_request_count(&self, tunnel_id: &Uuid) -> u64 {
+        match self.tunnel_index.get(tunnel_id).as_deref() {
+            Some(TunnelKey::Http(sub)) => self
+                .http_routes
+                .get(sub)
+                .map(|t| t.request_count.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            Some(TunnelKey::Tcp(port)) => self
+                .tcp_routes
+                .get(port)
+                .map(|t| t.request_count.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            None => 0,
+        }
+    }
+
     // ── resolution (hot path) ─────────────────────────────────────────────────
 
     /// Look up the tunnel and its session's control channel by subdomain.
