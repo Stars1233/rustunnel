@@ -18,6 +18,22 @@ pub struct Token {
     /// Optional comma-separated list of subdomain patterns this token may use.
     /// `None` means unrestricted (token may register any subdomain / protocol).
     pub scope: Option<String>,
+
+    // ── Platform billing fields (Phase 1) ─────────────────────────────────
+    /// User that owns this token. `None` for admin and agent tokens (legacy).
+    /// Limit checks are skipped when this is `None` for backwards compatibility.
+    pub user_id: Option<Uuid>,
+    /// Hard expiry timestamp. `None` means no expiry (human PAYG tokens).
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Tier identifier: "free" | "payg" | "micro" | "standard" | "project".
+    pub tier: Option<String>,
+    /// Maximum number of simultaneously open tunnels. `None` means unlimited.
+    pub tunnel_limit: Option<i32>,
+    /// Token lifecycle status. `"active"` | `"suspended"` | `"revoked"`.
+    pub status: String,
+    /// When `true`: bypasses `expires_at` and `tunnel_limit` checks entirely.
+    /// `status` is still enforced. Used for admin/testing/early-adopter tokens.
+    pub unlimited: bool,
 }
 
 /// One lifecycle record per tunnel registration.
@@ -46,6 +62,13 @@ pub struct TokenWithCount {
     pub last_used_at: Option<DateTime<Utc>>,
     pub scope: Option<String>,
     pub tunnel_count: i64,
+    // Platform billing fields
+    pub user_id: Option<Uuid>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub tier: Option<String>,
+    pub tunnel_limit: Option<i32>,
+    pub status: String,
+    pub unlimited: bool,
 }
 
 /// A tunnel_log row joined with the owning token's label.

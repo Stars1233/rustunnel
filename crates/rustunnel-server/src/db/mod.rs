@@ -100,6 +100,12 @@ pub async fn create_token(
         created_at: now,
         last_used_at: None,
         scope: scope.map(str::to_string),
+        user_id: None,
+        expires_at: None,
+        tier: None,
+        tunnel_limit: None,
+        status: "active".to_string(),
+        unlimited: false,
     };
     Ok((token, raw))
 }
@@ -108,7 +114,8 @@ pub async fn create_token(
 pub async fn verify_token(pool: &PgPool, raw: &str) -> Result<Option<Token>> {
     let hash = hash_token(raw);
     let token: Option<Token> = sqlx::query_as(
-        "SELECT id, token_hash, label, created_at, last_used_at, scope \
+        "SELECT id, token_hash, label, created_at, last_used_at, scope, \
+                user_id, expires_at, tier, tunnel_limit, status, unlimited \
          FROM tokens WHERE token_hash = $1",
     )
     .bind(&hash)
@@ -140,6 +147,7 @@ pub async fn delete_token(pool: &PgPool, id: &str) -> Result<bool> {
 pub async fn list_tokens_with_counts(pool: &PgPool) -> Result<Vec<TokenWithCount>> {
     let rows: Vec<TokenWithCount> = sqlx::query_as(
         "SELECT t.id, t.token_hash, t.label, t.created_at, t.last_used_at, t.scope, \
+                t.user_id, t.expires_at, t.tier, t.tunnel_limit, t.status, t.unlimited, \
                 COALESCE(COUNT(tl.id), 0) AS tunnel_count \
          FROM tokens t \
          LEFT JOIN tunnel_log tl ON tl.token_id = t.id \
@@ -149,6 +157,17 @@ pub async fn list_tokens_with_counts(pool: &PgPool) -> Result<Vec<TokenWithCount
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/// Set the `unlimited` flag on a token. Returns `true` if the token was found.
+pub async fn set_token_unlimited(pool: &PgPool, id: &str, unlimited: bool) -> Result<bool> {
+    let rows = sqlx::query("UPDATE tokens SET unlimited = $1 WHERE id = $2")
+        .bind(unlimited)
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(rows > 0)
 }
 
 // ── tunnel log helpers ────────────────────────────────────────────────────────
@@ -162,12 +181,13 @@ pub async fn log_tunnel_registered(
     session_id: &str,
     token_id: Option<&str>,
     region_id: &str,
+    user_id: Option<uuid::Uuid>,
 ) -> Result<()> {
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO tunnel_log \
-             (id, tunnel_id, protocol, label, session_id, token_id, registered_at, region_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             (id, tunnel_id, protocol, label, session_id, token_id, registered_at, region_id, user_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(tunnel_id)
@@ -177,6 +197,7 @@ pub async fn log_tunnel_registered(
     .bind(token_id)
     .bind(Utc::now())
     .bind(region_id)
+    .bind(user_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -196,13 +217,21 @@ pub async fn close_stale_tunnels(pool: &PgPool) -> Result<u64> {
     Ok(rows)
 }
 
-/// Set `unregistered_at` on the tunnel_log row for `tunnel_id`.
-pub async fn log_tunnel_unregistered(pool: &PgPool, tunnel_id: &str) -> Result<()> {
+/// Close the tunnel_log row for `tunnel_id`, recording final usage counters.
+pub async fn log_tunnel_unregistered(
+    pool: &PgPool,
+    tunnel_id: &str,
+    request_count: u64,
+    bytes_proxied: u64,
+) -> Result<()> {
     sqlx::query(
-        "UPDATE tunnel_log SET unregistered_at = $1 \
-         WHERE tunnel_id = $2 AND unregistered_at IS NULL",
+        "UPDATE tunnel_log \
+         SET unregistered_at = $1, request_count = $2, bytes_proxied = $3 \
+         WHERE tunnel_id = $4 AND unregistered_at IS NULL",
     )
     .bind(Utc::now())
+    .bind(request_count as i64)
+    .bind(bytes_proxied as i64)
     .bind(tunnel_id)
     .execute(pool)
     .await?;
