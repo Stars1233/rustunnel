@@ -543,13 +543,15 @@ where
                             });
                             let _ = db::log_tunnel_registered(
                                 &db.pg,
-                                &tunnel_id.to_string(),
-                                &proto_str,
-                                &sub,
-                                &session_id.to_string(),
-                                db_token_id.as_deref(),
-                                &config.region.id,
-                                token_user_id,
+                                db::TunnelRegistration {
+                                    tunnel_id: &tunnel_id.to_string(),
+                                    protocol: &proto_str,
+                                    label: &sub,
+                                    session_id: &session_id.to_string(),
+                                    token_id: db_token_id.as_deref(),
+                                    region_id: &config.region.id,
+                                    user_id: token_user_id,
+                                },
                             )
                             .await;
                             send_frame(
@@ -587,13 +589,15 @@ where
                         });
                         let _ = db::log_tunnel_registered(
                             &db.pg,
-                            &tunnel_id.to_string(),
-                            "tcp",
-                            &port_str,
-                            &session_id.to_string(),
-                            db_token_id.as_deref(),
-                            &config.region.id,
-                            token_user_id,
+                            db::TunnelRegistration {
+                                tunnel_id: &tunnel_id.to_string(),
+                                protocol: "tcp",
+                                label: &port_str,
+                                session_id: &session_id.to_string(),
+                                token_id: db_token_id.as_deref(),
+                                region_id: &config.region.id,
+                                user_id: token_user_id,
+                            },
                         )
                         .await;
                         send_frame(

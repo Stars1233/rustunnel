@@ -172,17 +172,19 @@ pub async fn set_token_unlimited(pool: &PgPool, id: &str, unlimited: bool) -> Re
 
 // ── tunnel log helpers ────────────────────────────────────────────────────────
 
+/// Arguments for [`log_tunnel_registered`].
+pub struct TunnelRegistration<'a> {
+    pub tunnel_id: &'a str,
+    pub protocol: &'a str,
+    pub label: &'a str,
+    pub session_id: &'a str,
+    pub token_id: Option<&'a str>,
+    pub region_id: &'a str,
+    pub user_id: Option<uuid::Uuid>,
+}
+
 /// Insert a tunnel_log row when a tunnel is registered.
-pub async fn log_tunnel_registered(
-    pool: &PgPool,
-    tunnel_id: &str,
-    protocol: &str,
-    label: &str,
-    session_id: &str,
-    token_id: Option<&str>,
-    region_id: &str,
-    user_id: Option<uuid::Uuid>,
-) -> Result<()> {
+pub async fn log_tunnel_registered(pool: &PgPool, reg: TunnelRegistration<'_>) -> Result<()> {
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO tunnel_log \
@@ -190,14 +192,14 @@ pub async fn log_tunnel_registered(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
-    .bind(tunnel_id)
-    .bind(protocol)
-    .bind(label)
-    .bind(session_id)
-    .bind(token_id)
+    .bind(reg.tunnel_id)
+    .bind(reg.protocol)
+    .bind(reg.label)
+    .bind(reg.session_id)
+    .bind(reg.token_id)
     .bind(Utc::now())
-    .bind(region_id)
-    .bind(user_id)
+    .bind(reg.region_id)
+    .bind(reg.user_id)
     .execute(pool)
     .await?;
     Ok(())
