@@ -376,9 +376,10 @@ async fn proxy_request(
 
     info!(%conn_id, subdomain, status, duration_ms, "request complete");
 
-    tunnel_info
-        .bytes_proxied
-        .fetch_add(request_bytes + response_bytes, std::sync::atomic::Ordering::Relaxed);
+    tunnel_info.bytes_proxied.fetch_add(
+        request_bytes + response_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     emit_capture(
         &ctx.capture_tx,

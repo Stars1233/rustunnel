@@ -245,8 +245,7 @@ where
         })
         .unwrap_or_default();
     for (tid, request_count, bytes_proxied) in &remaining {
-        let _ =
-            db::log_tunnel_unregistered(&db.pg, tid, *request_count, *bytes_proxied).await;
+        let _ = db::log_tunnel_unregistered(&db.pg, tid, *request_count, *bytes_proxied).await;
     }
 
     core.remove_session(&session_id);
@@ -641,14 +640,13 @@ where
             // Read counters before remove_tunnel clears the routing entry.
             let request_count = core.get_tunnel_request_count(&tunnel_id);
             let bytes_proxied = core.get_tunnel_bytes_proxied(&tunnel_id);
-            let _ =
-                db::log_tunnel_unregistered(
-                    &db.pg,
-                    &tunnel_id.to_string(),
-                    request_count,
-                    bytes_proxied,
-                )
-                .await;
+            let _ = db::log_tunnel_unregistered(
+                &db.pg,
+                &tunnel_id.to_string(),
+                request_count,
+                bytes_proxied,
+            )
+            .await;
             core.remove_tunnel(&tunnel_id);
         }
 

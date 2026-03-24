@@ -401,11 +401,7 @@ pub async fn get_admin_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Optio
 
 /// Update a user's status (e.g. "active" → "banned").
 /// Returns `true` if the row was found and updated.
-pub async fn set_user_status(
-    pool: &PgPool,
-    user_id: &uuid::Uuid,
-    status: &str,
-) -> Result<bool> {
+pub async fn set_user_status(pool: &PgPool, user_id: &uuid::Uuid, status: &str) -> Result<bool> {
     let rows = sqlx::query("UPDATE users SET status = $1 WHERE id = $2")
         .bind(status)
         .bind(user_id)

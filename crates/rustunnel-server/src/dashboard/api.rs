@@ -76,7 +76,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/admin/tokens/:id", patch(admin_patch_token))
         .route("/api/admin/users", get(admin_list_users))
         .route("/api/admin/users/:id", get(admin_get_user))
-        .route("/api/admin/users/:id", axum::routing::put(admin_update_user))
+        .route(
+            "/api/admin/users/:id",
+            axum::routing::put(admin_update_user),
+        )
         .layer(cors)
         .with_state(state)
 }
@@ -631,7 +634,9 @@ async fn admin_list_users(
         (Ok(users), Ok(total)) => Json(AdminUsersResponse { users, total }).into_response(),
         (Err(e), _) | (_, Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrBody { error: e.to_string() }),
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -657,7 +662,9 @@ async fn admin_get_user(
         Ok(None) => not_found("user not found").into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrBody { error: e.to_string() }),
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -702,7 +709,9 @@ async fn admin_update_user(
         Ok(false) => not_found("user not found").into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrBody { error: e.to_string() }),
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
