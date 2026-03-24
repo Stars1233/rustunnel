@@ -74,6 +74,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/history", get(tunnel_history))
         // admin-only
         .route("/api/admin/tokens/:id", patch(admin_patch_token))
+        .route("/api/admin/users", get(admin_list_users))
+        .route("/api/admin/users/:id", get(admin_get_user))
+        .route("/api/admin/users/:id", axum::routing::put(admin_update_user))
         .layer(cors)
         .with_state(state)
 }
@@ -583,6 +586,123 @@ async fn admin_patch_token(
             Json(ErrBody {
                 error: e.to_string(),
             }),
+        )
+            .into_response(),
+    }
+}
+
+// ── admin user routes ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AdminUsersQuery {
+    #[serde(default = "default_admin_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    search: Option<String>,
+}
+
+fn default_admin_limit() -> i64 {
+    50
+}
+
+#[derive(Serialize)]
+struct AdminUsersResponse {
+    users: Vec<db::AdminUser>,
+    total: i64,
+}
+
+/// `GET /api/admin/users` — paginated user list.
+async fn admin_list_users(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Query(q): axum::extract::Query<AdminUsersQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+
+    let search = q.search.as_deref();
+    let (users, total) = tokio::join!(
+        db::list_admin_users(&state.db.pg, q.limit, q.offset, search),
+        db::count_admin_users(&state.db.pg, search),
+    );
+    match (users, total) {
+        (Ok(users), Ok(total)) => Json(AdminUsersResponse { users, total }).into_response(),
+        (Err(e), _) | (_, Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody { error: e.to_string() }),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/admin/users/:id` — single user detail.
+async fn admin_get_user(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+
+    let user_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => return not_found("invalid user id").into_response(),
+    };
+
+    match db::get_admin_user(&state.db.pg, &user_id).await {
+        Ok(Some(user)) => Json(user).into_response(),
+        Ok(None) => not_found("user not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody { error: e.to_string() }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateUserBody {
+    /// New status: "active" | "banned" | "suspended"
+    status: String,
+}
+
+/// `PUT /api/admin/users/:id` — update user status (ban, unban, suspend).
+async fn admin_update_user(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateUserBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+
+    // Validate status value.
+    let allowed = ["active", "banned", "suspended"];
+    if !allowed.contains(&body.status.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrBody {
+                error: format!("status must be one of: {}", allowed.join(", ")),
+            }),
+        )
+            .into_response();
+    }
+
+    let user_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => return not_found("invalid user id").into_response(),
+    };
+
+    match db::set_user_status(&state.db.pg, &user_id, &body.status).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found("user not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody { error: e.to_string() }),
         )
             .into_response(),
     }

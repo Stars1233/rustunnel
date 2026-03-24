@@ -50,6 +50,8 @@ pub struct TunnelInfo {
     pub created_at: Instant,
     /// Monotonically-increasing counter of proxied requests/connections.
     pub request_count: Arc<AtomicU64>,
+    /// Total bytes proxied through this tunnel (upstream + downstream combined).
+    pub bytes_proxied: Arc<AtomicU64>,
     /// Limits concurrent proxied connections for this tunnel.
     /// Shared across all clones so every proxy task draws from the same pool.
     pub conn_semaphore: Arc<Semaphore>,
