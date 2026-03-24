@@ -10,7 +10,7 @@
 //! plane server.  On each accepted TCP connection, read the current config
 //! with `handle.load()` to pick up renewed certificates automatically:
 //!
-//! ```rust,ignore
+//! ```text
 //! let tls_handle = cert_manager.tls_handle();
 //! // … inside the accept loop:
 //! let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&tls_handle.load()));
