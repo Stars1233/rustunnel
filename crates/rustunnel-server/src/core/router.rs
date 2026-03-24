@@ -201,6 +201,7 @@ impl TunnelCore {
             assigned_port: None,
             created_at: std::time::Instant::now(),
             request_count: Arc::new(AtomicU64::new(0)),
+            bytes_proxied: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
@@ -232,6 +233,7 @@ impl TunnelCore {
             assigned_port: Some(port),
             created_at: std::time::Instant::now(),
             request_count: Arc::new(AtomicU64::new(0)),
+            bytes_proxied: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
@@ -275,6 +277,24 @@ impl TunnelCore {
                 .tcp_routes
                 .get(port)
                 .map(|t| t.request_count.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Return the current bytes-proxied counter for a tunnel without removing it.
+    /// Returns 0 if the tunnel is unknown.
+    pub fn get_tunnel_bytes_proxied(&self, tunnel_id: &Uuid) -> u64 {
+        match self.tunnel_index.get(tunnel_id).as_deref() {
+            Some(TunnelKey::Http(sub)) => self
+                .http_routes
+                .get(sub)
+                .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            Some(TunnelKey::Tcp(port)) => self
+                .tcp_routes
+                .get(port)
+                .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
                 .unwrap_or(0),
             None => 0,
         }

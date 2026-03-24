@@ -227,19 +227,25 @@ where
     let _ = hb_stop_tx.send(());
 
     // Mark any tunnels still open at disconnect time as unregistered.
-    // Collect request counts from the routing table BEFORE remove_session clears them.
-    let remaining: Vec<(String, u64)> = core
+    // Collect request counts and bytes from the routing table BEFORE remove_session clears them.
+    let remaining: Vec<(String, u64, u64)> = core
         .sessions
         .get(&session_id)
         .map(|s| {
             s.tunnels
                 .iter()
-                .map(|id| (id.to_string(), core.get_tunnel_request_count(id)))
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        core.get_tunnel_request_count(id),
+                        core.get_tunnel_bytes_proxied(id),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
-    for (tid, request_count) in &remaining {
-        let _ = db::log_tunnel_unregistered(&db.pg, tid, *request_count, 0).await;
+    for (tid, request_count, bytes_proxied) in &remaining {
+        let _ = db::log_tunnel_unregistered(&db.pg, tid, *request_count, *bytes_proxied).await;
     }
 
     core.remove_session(&session_id);
@@ -631,10 +637,16 @@ where
                 tunnel_id: tunnel_id.to_string(),
                 label: String::new(),
             });
-            // Read request count before remove_tunnel clears the routing entry.
+            // Read counters before remove_tunnel clears the routing entry.
             let request_count = core.get_tunnel_request_count(&tunnel_id);
-            let _ =
-                db::log_tunnel_unregistered(&db.pg, &tunnel_id.to_string(), request_count, 0).await;
+            let bytes_proxied = core.get_tunnel_bytes_proxied(&tunnel_id);
+            let _ = db::log_tunnel_unregistered(
+                &db.pg,
+                &tunnel_id.to_string(),
+                request_count,
+                bytes_proxied,
+            )
+            .await;
             core.remove_tunnel(&tunnel_id);
         }
 

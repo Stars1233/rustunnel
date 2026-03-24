@@ -330,3 +330,83 @@ pub async fn count_tunnel_history(
     .await?;
     Ok(count.0)
 }
+
+// ── admin user helpers ────────────────────────────────────────────────────────
+
+/// A minimal user row returned by admin list/detail endpoints.
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct AdminUser {
+    pub id: uuid::Uuid,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub email_verified: bool,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Number of API tokens belonging to this user.
+    pub token_count: i64,
+}
+
+/// Paginated list of all users (newest first).
+pub async fn list_admin_users(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+    search: Option<&str>,
+) -> Result<Vec<AdminUser>> {
+    let rows: Vec<AdminUser> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
+                COUNT(t.id)::bigint AS token_count
+         FROM users u
+         LEFT JOIN tokens t ON t.user_id = u.id
+         WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
+         GROUP BY u.id
+         ORDER BY u.created_at DESC
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(search)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Total user count (for pagination).
+pub async fn count_admin_users(pool: &PgPool, search: Option<&str>) -> Result<i64> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM users \
+         WHERE ($1::text IS NULL OR email ILIKE '%' || $1 || '%')",
+    )
+    .bind(search)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+/// Single user detail with their token list.
+pub async fn get_admin_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<AdminUser>> {
+    let row: Option<AdminUser> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
+                COUNT(t.id)::bigint AS token_count
+         FROM users u
+         LEFT JOIN tokens t ON t.user_id = u.id
+         WHERE u.id = $1
+         GROUP BY u.id",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Update a user's status (e.g. "active" → "banned").
+/// Returns `true` if the row was found and updated.
+pub async fn set_user_status(pool: &PgPool, user_id: &uuid::Uuid, status: &str) -> Result<bool> {
+    let rows = sqlx::query("UPDATE users SET status = $1 WHERE id = $2")
+        .bind(status)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(rows > 0)
+}

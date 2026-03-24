@@ -344,7 +344,15 @@ async fn proxy_request(
 
     // ── 6. WebSocket upgrade fast-path ────────────────────────────────────
     if is_ws {
-        return handle_ws_upgrade(req, yamux_stream, conn_id, &ctx, start).await;
+        return handle_ws_upgrade(
+            req,
+            yamux_stream,
+            conn_id,
+            &ctx,
+            start,
+            tunnel_info.bytes_proxied.clone(),
+        )
+        .await;
     }
 
     // ── 7. HTTP proxy ─────────────────────────────────────────────────────
@@ -367,6 +375,11 @@ async fn proxy_request(
     let duration_ms = start.elapsed().as_millis() as u64;
 
     info!(%conn_id, subdomain, status, duration_ms, "request complete");
+
+    tunnel_info.bytes_proxied.fetch_add(
+        request_bytes + response_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     emit_capture(
         &ctx.capture_tx,
@@ -442,6 +455,7 @@ async fn handle_ws_upgrade(
     conn_id: Uuid,
     ctx: &ProxyCtx,
     start: Instant,
+    bytes_proxied: Arc<std::sync::atomic::AtomicU64>,
 ) -> Response<BoxBody> {
     debug!(%conn_id, "WebSocket upgrade");
 
@@ -456,7 +470,10 @@ async fn handle_ws_upgrade(
                 // yamux::Stream (futures::io) → tokio::io via compat().
                 let mut upstream = yamux_stream.compat();
                 match tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await {
-                    Ok((up, dn)) => debug!(%conn_id, bytes_up=up, bytes_dn=dn, "WS done"),
+                    Ok((up, dn)) => {
+                        debug!(%conn_id, bytes_up=up, bytes_dn=dn, "WS done");
+                        bytes_proxied.fetch_add(up + dn, std::sync::atomic::Ordering::Relaxed);
+                    }
                     Err(e) => debug!(%conn_id, "WS copy: {e}"),
                 }
             }
