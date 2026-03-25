@@ -28,8 +28,8 @@ cd rustunnel
 
 The `deploy/Dockerfile` is a three-stage build:
 
-1. **`ui-builder`** — installs Node 20, runs `next build`, and produces the static dashboard export under `out/`.
-2. **`builder`** — compiles the Rust server. The Next.js `out/` directory is copied into `crates/rustunnel-server/src/dashboard/assets/` so `rust-embed` can bake it into the binary at compile time.
+1. **`ui-builder`** — installs Node 20, runs `next build` on the dashboard UI, and produces the static export under `out/`.
+2. **`builder`** — compiles the Rust server. The `out/` directory is copied into `crates/rustunnel-server/src/dashboard/assets/` so `rust-embed` can bake it into the binary at compile time.
 3. **`runtime`** — minimal `debian:bookworm-slim` image containing only the server binary and `ca-certificates`.
 
 Because both the UI and the Rust binary are built inside Docker you do **not** need Node.js or Rust installed on the host to build or run the image.
@@ -153,6 +153,12 @@ Use this when you have a cloud server (Ubuntu 22.04 or later recommended) with a
 | Wildcard DNS | `*.edge.rustunnel.com → <server public IP>` |
 | TLS | Let's Encrypt via Certbot + Cloudflare DNS challenge |
 | OS | Ubuntu 22.04 LTS |
+| PostgreSQL | Managed instance or self-hosted (required — see below) |
+
+> **PostgreSQL is required.** The server uses PostgreSQL to store API tokens and
+> the tunnel audit log. You may run PostgreSQL on the same VPS or use a managed
+> service (e.g. Supabase, Neon, AWS RDS, DigitalOcean Managed Databases).
+> Set the connection URL in `deploy/server.toml` under `[database] url`.
 
 Set up the wildcard DNS record with your DNS provider before continuing.
 Both `edge.rustunnel.com` (bare) and `*.edge.rustunnel.com` (wildcard) must resolve to your server IP — the wildcard is required so HTTP tunnel subdomains work.
@@ -367,7 +373,9 @@ docker compose -f deploy/docker-compose.yml up -d --force-recreate rustunnel-ser
 ```
 
 The `--force-recreate` flag restarts the container with the new image while
-leaving the `rustunnel-data` volume (SQLite database + state) intact.
+leaving the `rustunnel-data` volume (SQLite captured-request data) intact.
+PostgreSQL data lives outside the container and is unaffected by container
+updates.
 
 ---
 

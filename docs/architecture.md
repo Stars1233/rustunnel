@@ -57,8 +57,8 @@ Key design choices:
               │               │             │
               │  ┌────────────▼───────────┐ │
               │  │  Control-Plane WS      │ │
-              │  │  :9000  /_control      │ │
-              │  │  :9000  /_data/<id>    │ │
+              │  │  :4040  /_control      │ │
+              │  │  :4040  /_data/<id>    │ │
               │  └────────────────────────┘ │
               └──────────────┬──────────────┘
                              │  WebSocket (TLS)
@@ -90,12 +90,12 @@ The server is a single binary (`rustunnel-server`) composed of six concurrently 
 
 ```
 rustunnel-server
-├── a) Control-plane WebSocket server  (:9000)
+├── a) Control-plane WebSocket server  (:4040)
 │      /_control  — JSON control frames
 │      /_data/<session_id>  — binary yamux frames
 ├── b) HTTP + HTTPS edge proxy  (:80, :443)
 ├── c) TCP edge proxy  (dynamic ports)
-├── d) Dashboard REST API + SPA  (:4040)
+├── d) Dashboard REST API + SPA  (:4041)
 ├── e) Prometheus metrics endpoint  (:9090)
 └── f) ACME certificate renewal task (background)
 ```
@@ -129,9 +129,9 @@ For each registered TCP tunnel, the server allocates a port from a configured ra
 
 ### d) Dashboard
 
-Serves a React SPA and a REST API for:
+Serves the dashboard UI and a REST API for:
 - Listing active sessions and tunnels
-- Creating and revoking API tokens (stored in SQLite)
+- Creating and revoking API tokens (stored in PostgreSQL)
 - Viewing a live request capture feed (via Server-Sent Events)
 - Viewing audit logs
 
@@ -435,7 +435,7 @@ Two modes are supported:
 ### Authentication
 
 1. The client sends an `Auth` frame with a **bearer token**.
-2. The server validates the token against its SQLite database.
+2. The server validates the token against its PostgreSQL database.
 3. A failed auth returns `AuthError` and closes the connection. Auth errors are **fatal** on the client — reconnect is not attempted.
 
 ### `--insecure` flag
@@ -515,12 +515,20 @@ rustunnel-server
 ├── tokio-tungstenite    (WebSocket server)
 ├── yamux 0.13           (stream multiplexer)
 ├── rustls               (TLS — ring provider + ACME)
-├── sqlx + SQLite        (token storage + audit)
+├── sqlx + PostgreSQL    (token storage + tunnel log)
+├── sqlx + SQLite        (captured request storage)
 ├── dashmap              (lock-free routing table)
 ├── parking_lot          (port pool mutex)
 ├── clap                 (CLI)
 ├── serde-json           (frame + REST serialization)
 └── tracing              (structured logging)
+
+rustunnel-mcp  (MCP server)
+├── rustunnel-protocol   (control frame types)
+├── tokio                (async runtime)
+├── reqwest              (REST API client)
+├── serde-json           (JSON-RPC serialization)
+└── clap                 (CLI)
 
 rustunnel-protocol  (shared library crate)
 ├── serde + serde-json   (frame serialization)
@@ -537,12 +545,18 @@ rustunnel/
 ├── Makefile
 ├── deploy/
 │   ├── Dockerfile
-│   ├── docker-compose.yml
+│   ├── docker-compose.yml      (production)
+│   ├── docker-compose.local.yml (local dev)
+│   ├── server.toml             (production config template)
 │   └── rustunnel.service       (systemd unit)
-├── dashboard-ui/               (React SPA, embedded into server binary)
+├── dashboard-ui/               (Next.js dashboard UI)
 ├── docs/
 │   ├── client-guide.md
-│   └── architecture.md
+│   ├── api-reference.md
+│   ├── architecture.md
+│   ├── database.md
+│   ├── docker-deployment.md
+│   └── mcp-server.md
 ├── tests/
 │   ├── common/mod.rs           (test helpers: test server, connect_data_bridge)
 │   └── integration/
@@ -561,8 +575,12 @@ rustunnel/
     │       ├── control.rs      (connect(), main_loop(), drive_client_mux())
     │       ├── reconnect.rs    (exponential backoff retry loop)
     │       ├── proxy.rs        (proxy_connection() — local TCP bridge)
+    │       ├── regions.rs      (region discovery + latency probe)
     │       ├── display.rs      (spinner, startup box, request log)
     │       └── error.rs        (Error enum)
+    ├── rustunnel-mcp/          (MCP server for AI agent integration)
+    │   └── src/
+    │       └── main.rs         (JSON-RPC over stdio, tool dispatch)
     └── rustunnel-server/
         └── src/
             ├── main.rs         (entry point, subsystem wiring)
@@ -590,8 +608,11 @@ rustunnel/
             │   ├── ui.rs       (embedded SPA serving)
             │   └── capture.rs  (SSE stream for live request feed)
             ├── db/
-            │   ├── mod.rs      (SQLite pool init)
+            │   ├── mod.rs      (PostgreSQL pool init + SQLite pool init)
             │   └── models.rs   (Token model + queries)
+            ├── migrations/
+            │   ├── pg/         (PostgreSQL migrations — tokens, tunnel_log)
+            │   └── local/      (SQLite migrations — captured_requests)
             └── tls/
                 ├── mod.rs      (CertManager — static PEM or ACME)
                 └── acme.rs     (ACME challenge + renewal)

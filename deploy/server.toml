@@ -72,9 +72,8 @@ require_auth = true
 # ── Database ──────────────────────────────────────────────────────────────────
 [database]
 # PostgreSQL connection URL for shared data (tokens, tunnel history).
-# The DB server's private IP is used — traffic stays on the Hetzner private network.
-# TODO: replace with your actual DB password.
-url = "postgresql://rustunnel:CHANGE_ME@10.0.0.3:5432/rustunnel"
+# TODO: replace with your actual database host and password.
+url = "postgresql://rustunnel:CHANGE_ME@db.example.com:5432/rustunnel"
 
 # Per-region SQLite file for captured HTTP request data.
 # Persisted in the rustunnel-data Docker volume across restarts.

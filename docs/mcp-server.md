@@ -304,8 +304,8 @@ Retrieve the history of past tunnels.
 
 ### Hosted service
 
-Request a token by opening a [GitHub Issue](https://github.com/joaoh82/rustunnel/issues/new)
-titled **"Token request"** with your email address or Discord username. We will send it to you privately.
+Sign up at [rustunnel.com](https://rustunnel.com), then create an API key from
+the dashboard under **Settings → API Keys**.
 
 ### Self-hosted server
 
