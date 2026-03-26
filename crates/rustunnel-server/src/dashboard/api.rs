@@ -80,6 +80,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/admin/users/:id",
             axum::routing::put(admin_update_user),
         )
+        .route("/api/admin/plans", get(admin_list_plans))
+        .route("/api/admin/usage/platform", get(admin_platform_usage))
+        .route("/api/admin/users/:id/tunnels", get(admin_list_user_tunnels))
+        .route("/api/admin/users/:id/tokens", get(admin_list_user_tokens))
         .layer(cors)
         .with_state(state)
 }
@@ -707,6 +711,116 @@ async fn admin_update_user(
     match db::set_user_status(&state.db.pg, &user_id, &body.status).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found("user not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ── admin plan / usage / per-user routes ──────────────────────────────────────
+
+/// `GET /api/admin/plans` — list all plans with their active subscriber counts.
+async fn admin_list_plans(headers: HeaderMap, State(state): State<ApiState>) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+    match db::list_admin_plans(&state.db.pg).await {
+        Ok(plans) => Json(plans).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/admin/usage/platform` — platform-wide aggregate ops metrics.
+///
+/// Queries the shared PostgreSQL so the result covers all regions.
+async fn admin_platform_usage(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+    match db::get_platform_usage(&state.db.pg).await {
+        Ok(usage) => Json(usage).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UserTunnelsQuery {
+    #[serde(default = "default_admin_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+#[derive(Serialize)]
+struct UserTunnelsResponse {
+    entries: Vec<db::AdminTunnelEntry>,
+    total: i64,
+}
+
+/// `GET /api/admin/users/:id/tunnels` — paginated tunnel history for one user.
+async fn admin_list_user_tunnels(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<UserTunnelsQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+    let user_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => return not_found("invalid user id").into_response(),
+    };
+    let (entries, total) = tokio::join!(
+        db::list_user_tunnels(&state.db.pg, &user_id, q.limit, q.offset),
+        db::count_user_tunnels(&state.db.pg, &user_id),
+    );
+    match (entries, total) {
+        (Ok(entries), Ok(total)) => Json(UserTunnelsResponse { entries, total }).into_response(),
+        (Err(e), _) | (_, Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/admin/users/:id/tokens` — all tokens belonging to one user.
+async fn admin_list_user_tokens(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+    let user_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => return not_found("invalid user id").into_response(),
+    };
+    match db::list_user_tokens(&state.db.pg, &user_id).await {
+        Ok(tokens) => Json(tokens).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrBody {

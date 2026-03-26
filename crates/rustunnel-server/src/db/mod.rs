@@ -61,6 +61,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub use models::{AdminPlan, AdminTunnelEntry};
 use models::{Region, Token, TokenWithCount, TunnelLogEntry};
 
 /// Hash a raw token value with SHA-256.
@@ -409,4 +410,128 @@ pub async fn set_user_status(pool: &PgPool, user_id: &uuid::Uuid, status: &str) 
         .await?
         .rows_affected();
     Ok(rows > 0)
+}
+
+// ── admin plan helpers ────────────────────────────────────────────────────────
+
+/// All plans with their live active-subscriber count.
+pub async fn list_admin_plans(pool: &PgPool) -> Result<Vec<AdminPlan>> {
+    let rows: Vec<AdminPlan> = sqlx::query_as(
+        "SELECT p.id, p.name, p.billing_model, p.monthly_price_cents,
+                p.max_tunnels, p.max_connections, p.rate_limit_rps,
+                p.bandwidth_limit_gb, p.history_days, p.is_active,
+                COUNT(s.id)::bigint AS subscriber_count
+         FROM plans p
+         LEFT JOIN subscriptions s ON s.plan_id = p.id AND s.status = 'active'
+         GROUP BY p.id
+         ORDER BY p.monthly_price_cents ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+// ── admin platform usage helpers ──────────────────────────────────────────────
+
+/// Platform-wide aggregate metrics drawn from the shared tunnel_log and users tables.
+/// Queries all regions via the shared PostgreSQL — no per-region fan-out needed.
+#[derive(Debug, serde::Serialize)]
+pub struct PlatformUsage {
+    /// Open tunnels across all regions right now.
+    pub active_tunnels_global: i64,
+    /// Tunnel registrations since midnight UTC today (all regions).
+    pub tunnels_today: i64,
+    /// Distinct users with at least one open tunnel right now.
+    pub active_users: i64,
+    /// Bytes proxied since midnight UTC today (all regions).
+    pub bandwidth_today_bytes: i64,
+    /// Total registered user accounts.
+    pub total_users: i64,
+}
+
+pub async fn get_platform_usage(pool: &PgPool) -> Result<PlatformUsage> {
+    let (active_tunnels, tunnels_today, active_users, bandwidth_today, total_users) = tokio::join!(
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*)::bigint FROM tunnel_log WHERE unregistered_at IS NULL"
+        )
+        .fetch_one(pool),
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*)::bigint FROM tunnel_log WHERE registered_at >= CURRENT_DATE"
+        )
+        .fetch_one(pool),
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(DISTINCT user_id)::bigint FROM tunnel_log \
+             WHERE unregistered_at IS NULL AND user_id IS NOT NULL"
+        )
+        .fetch_one(pool),
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COALESCE(SUM(bytes_proxied), 0)::bigint FROM tunnel_log \
+             WHERE registered_at >= CURRENT_DATE"
+        )
+        .fetch_one(pool),
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM users").fetch_one(pool),
+    );
+    Ok(PlatformUsage {
+        active_tunnels_global: active_tunnels?.0,
+        tunnels_today: tunnels_today?.0,
+        active_users: active_users?.0,
+        bandwidth_today_bytes: bandwidth_today?.0,
+        total_users: total_users?.0,
+    })
+}
+
+// ── admin per-user tunnel / token helpers ─────────────────────────────────────
+
+/// Paginated tunnel history for a single user (newest first).
+pub async fn list_user_tunnels(
+    pool: &PgPool,
+    user_id: &uuid::Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AdminTunnelEntry>> {
+    let rows: Vec<AdminTunnelEntry> = sqlx::query_as(
+        "SELECT tl.id, tl.tunnel_id, tl.protocol, tl.label, tl.session_id,
+                tl.token_id, t.label AS token_label,
+                tl.registered_at, tl.unregistered_at, tl.region_id,
+                tl.bytes_proxied, tl.request_count, tl.user_id
+         FROM tunnel_log tl
+         LEFT JOIN tokens t ON t.id::text = tl.token_id
+         WHERE tl.user_id = $1
+         ORDER BY tl.registered_at DESC
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Total tunnel_log rows for a given user (for pagination).
+pub async fn count_user_tunnels(pool: &PgPool, user_id: &uuid::Uuid) -> Result<i64> {
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*)::bigint FROM tunnel_log WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
+}
+
+/// All tokens owned by a user with their historical tunnel registration counts.
+pub async fn list_user_tokens(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Vec<TokenWithCount>> {
+    let rows: Vec<TokenWithCount> = sqlx::query_as(
+        "SELECT t.id, t.token_hash, t.label, t.created_at, t.last_used_at, t.scope,
+                t.user_id, t.expires_at, t.tier, t.tunnel_limit, t.status, t.unlimited,
+                COALESCE(COUNT(tl.id), 0)::bigint AS tunnel_count
+         FROM tokens t
+         LEFT JOIN tunnel_log tl ON tl.token_id = t.id::text
+         WHERE t.user_id = $1
+         GROUP BY t.id
+         ORDER BY t.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
