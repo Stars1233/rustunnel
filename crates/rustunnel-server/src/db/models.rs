@@ -92,6 +92,44 @@ pub struct TunnelLogEntry {
     pub region_id: Option<String>,
 }
 
+/// A plan row with its live subscriber count.
+/// Returned by `GET /api/admin/plans`.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct AdminPlan {
+    pub id: Uuid,
+    pub name: String,
+    pub billing_model: String,
+    pub monthly_price_cents: i32,
+    pub max_tunnels: Option<i32>,
+    pub max_connections: i32,
+    pub rate_limit_rps: i32,
+    pub bandwidth_limit_gb: Option<i32>,
+    pub history_days: i32,
+    pub is_active: bool,
+    /// Number of subscriptions with `status = 'active'` on this plan.
+    pub subscriber_count: i64,
+}
+
+/// A tunnel_log row enriched with usage counters for admin inspection.
+/// Extends `TunnelLogEntry` with `bytes_proxied`, `request_count`, and `user_id`.
+/// Returned by `GET /api/admin/users/:id/tunnels`.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct AdminTunnelEntry {
+    pub id: String,
+    pub tunnel_id: String,
+    pub protocol: String,
+    pub label: String,
+    pub session_id: String,
+    pub token_id: Option<String>,
+    pub token_label: Option<String>,
+    pub registered_at: DateTime<Utc>,
+    pub unregistered_at: Option<DateTime<Utc>>,
+    pub region_id: Option<String>,
+    pub bytes_proxied: i64,
+    pub request_count: i64,
+    pub user_id: Option<Uuid>,
+}
+
 /// A row from the `regions` table.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct Region {
