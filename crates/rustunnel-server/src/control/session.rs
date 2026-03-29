@@ -478,7 +478,9 @@ where
 
             // ── Token limit enforcement ────────────────────────────────────
             // status is always checked; limit/expiry checks are skipped for
-            // unlimited tokens and for tokens with no user_id (legacy tokens).
+            // unlimited tokens and for tokens with no user_id (direct/admin/legacy tokens).
+            // Tunnel limit is enforced at the user level from the plan, not per-token,
+            // so creating multiple tokens cannot be used to bypass the plan limit.
             if let Some(token) = db_token {
                 if token.status != "active" {
                     send_frame(
@@ -505,24 +507,39 @@ where
                             return Ok(());
                         }
                     }
-                    if let (Some(limit), Some(user_id)) = (token.tunnel_limit, token.user_id) {
-                        let row: (i64,) = sqlx::query_as(
-                            "SELECT COUNT(*) FROM tunnel_log \
-                             WHERE user_id = $1 AND unregistered_at IS NULL",
+                    // Enforce the user's plan tunnel limit globally across all their tokens.
+                    // Bypassed for tokens with no user_id (direct/admin/legacy tokens).
+                    if let Some(user_id) = token.user_id {
+                        let limit: Option<i32> = sqlx::query_scalar(
+                            "SELECT p.max_tunnels FROM subscriptions s \
+                             JOIN plans p ON p.id = s.plan_id \
+                             WHERE s.user_id = $1 AND s.status = 'active' \
+                             ORDER BY s.created_at DESC LIMIT 1",
                         )
                         .bind(user_id)
-                        .fetch_one(&db.pg)
-                        .await?;
-                        if row.0 >= limit as i64 {
-                            send_frame(
-                                ws,
-                                &ControlFrame::TunnelError {
-                                    request_id,
-                                    message: format!("tunnel limit of {limit} reached"),
-                                },
+                        .fetch_optional(&db.pg)
+                        .await?
+                        .flatten();
+
+                        if let Some(limit) = limit {
+                            let row: (i64,) = sqlx::query_as(
+                                "SELECT COUNT(*) FROM tunnel_log \
+                                 WHERE user_id = $1 AND unregistered_at IS NULL",
                             )
+                            .bind(user_id)
+                            .fetch_one(&db.pg)
                             .await?;
-                            return Ok(());
+                            if row.0 >= limit as i64 {
+                                send_frame(
+                                    ws,
+                                    &ControlFrame::TunnelError {
+                                        request_id,
+                                        message: format!("tunnel limit of {limit} reached"),
+                                    },
+                                )
+                                .await?;
+                                return Ok(());
+                            }
                         }
                     }
                 }
