@@ -510,35 +510,56 @@ where
                     // Enforce the user's plan tunnel limit globally across all their tokens.
                     // Bypassed for tokens with no user_id (direct/admin/legacy tokens).
                     if let Some(user_id) = token.user_id {
-                        let limit: Option<i32> = sqlx::query_scalar(
-                            "SELECT p.max_tunnels FROM subscriptions s \
+                        let plan = sqlx::query_as::<_, (Option<i32>, bool)>(
+                            "SELECT p.max_tunnels, p.allow_custom_subdomains \
+                             FROM subscriptions s \
                              JOIN plans p ON p.id = s.plan_id \
                              WHERE s.user_id = $1 AND s.status = 'active' \
                              ORDER BY s.created_at DESC LIMIT 1",
                         )
                         .bind(user_id)
                         .fetch_optional(&db.pg)
-                        .await?
-                        .flatten();
+                        .await?;
 
-                        if let Some(limit) = limit {
-                            let row: (i64,) = sqlx::query_as(
-                                "SELECT COUNT(*) FROM tunnel_log \
-                                 WHERE user_id = $1 AND unregistered_at IS NULL",
-                            )
-                            .bind(user_id)
-                            .fetch_one(&db.pg)
-                            .await?;
-                            if row.0 >= limit as i64 {
-                                send_frame(
-                                    ws,
-                                    &ControlFrame::TunnelError {
-                                        request_id,
-                                        message: format!("tunnel limit of {limit} reached"),
-                                    },
+                        if let Some((max_tunnels, allow_custom_subdomains)) = plan {
+                            // Tunnel count limit.
+                            if let Some(limit) = max_tunnels {
+                                let row: (i64,) = sqlx::query_as(
+                                    "SELECT COUNT(*) FROM tunnel_log \
+                                     WHERE user_id = $1 AND unregistered_at IS NULL",
                                 )
+                                .bind(user_id)
+                                .fetch_one(&db.pg)
                                 .await?;
-                                return Ok(());
+                                if row.0 >= limit as i64 {
+                                    send_frame(
+                                        ws,
+                                        &ControlFrame::TunnelError {
+                                            request_id,
+                                            message: format!("tunnel limit of {limit} reached"),
+                                        },
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                            }
+
+                            // Custom subdomain gate — only HTTP/HTTPS tunnels use subdomains.
+                            if !allow_custom_subdomains {
+                                if let Some(ref requested) = subdomain {
+                                    if !requested.is_empty() {
+                                        send_frame(
+                                            ws,
+                                            &ControlFrame::TunnelError {
+                                                request_id,
+                                                message: "custom subdomains require a paid plan"
+                                                    .into(),
+                                            },
+                                        )
+                                        .await?;
+                                        return Ok(());
+                                    }
+                                }
                             }
                         }
                     }
