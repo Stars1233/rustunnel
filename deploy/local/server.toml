@@ -6,7 +6,7 @@ http_port      = 8080
 https_port     = 8443
 control_port   = 4040
 dashboard_port = 4041
-dashboard_origin = "http://localhost:3000"
+dashboard_origin = "http://localhost:3002"
 
 [tls]
 cert_path = "/tmp/rustunnel-dev/cert.pem"
