@@ -364,8 +364,22 @@ impl TestServer {
         });
         task_handles.push(h.abort_handle());
 
-        // Wait for all sockets to bind before returning.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait until the control plane is actually accepting TCP connections.
+        // A fixed sleep is unreliable on CI; polling eliminates the race.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{control_port}"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server control plane did not start within 5 seconds"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         Self {
             control_port,
