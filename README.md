@@ -70,13 +70,21 @@ The client auto-selects the nearest region by default. Use `--region <id>` to co
 
 ### Getting an auth token
 
-Access to the hosted service requires an auth token. To request one:
+Sign up for a free account at **[rustunnel.com](https://rustunnel.com)** — no waiting list, no manual approval.
 
-1. Open a [GitHub Issue](https://github.com/joaoh82/rustunnel/issues/new) titled **"Token request"**
-2. Include your **email address** or **Discord username** in the body
-3. We will send you a token privately
+1. Create an account at [rustunnel.com](https://rustunnel.com)
+2. Go to **Dashboard → API Keys** and create a token
+3. Copy the token — it is shown only once
 
-Tokens are issued manually for now while the service is in early access.
+**Plans:**
+
+| Plan | Price | Tunnels | Custom subdomains | TLS/HTTPS |
+|------|-------|---------|-------------------|-----------|
+| Free | $0 | Up to 3 | — | ✓ |
+| Pay-as-you-go | $3/mo minimum + $0.10/GB | Unlimited | ✓ | ✓ |
+| Self-host | Free (run your own server) | Unlimited | ✓ | ✓ |
+
+The free plan is a great way to get started. Upgrade to pay-as-you-go from your dashboard whenever you need custom subdomains or unlimited tunnels.
 
 ### Quick start with the hosted server
 
@@ -747,19 +755,21 @@ rustunnel start --config /path/to/config.yml
 
 ### Token management
 
-Create additional auth tokens via the dashboard API:
+**Hosted service:** manage tokens from the [rustunnel.com](https://rustunnel.com) dashboard under **Dashboard → API Keys**. You can create, label, and revoke tokens without any CLI commands.
+
+**Self-hosted:** create additional tokens via the dashboard API:
 
 ```bash
 rustunnel token create \
   --name "ci-deploy" \
-  --server edge.rustunnel.com:8443 \
+  --server your-server:8443 \
   --admin-token YOUR_ADMIN_TOKEN
 ```
 
 Or via `curl`:
 
 ```bash
-curl -s -X POST http://edge.rustunnel.com:8443/api/tokens \
+curl -s -X POST https://your-server:8443/api/tokens \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"label": "ci-deploy"}'

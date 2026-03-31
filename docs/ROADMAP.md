@@ -67,6 +67,18 @@ This document tracks the features that have already shipped and ideas planned fo
 - [x] Pre-built release binaries for Linux (x86_64, aarch64) and macOS via GitHub Releases
 - [x] `rustunnel setup` — interactive wizard that creates `~/.rustunnel/config.yml` with prompted server, auth token, and region values
 
+### Managed service & self-service accounts
+- [x] Public website at [rustunnel.com](https://rustunnel.com) with marketing page, pricing, and documentation
+- [x] Self-service user registration and email verification — no manual token issuance
+- [x] User dashboard — API key management (create, label, revoke), usage stats, tunnel history
+- [x] Free tier — up to 3 tunnels, TLS/HTTPS termination included
+- [x] Pay-as-you-go plan — unlimited tunnels, custom subdomains, TLS/HTTPS termination
+- [x] Stripe billing integration — $3/month minimum + $0.10/GB overage above 30 GB
+- [x] Spend cap setting — users can cap their monthly PAYG spend from the dashboard
+- [x] Payment method management via Stripe Customer Portal
+- [x] Invoice history in the user dashboard
+- [x] Custom subdomains gated by plan (PAYG and self-hosted only)
+
 ### Multi-region infrastructure
 - [x] PostgreSQL-backed `regions` table with region metadata (id, name, location, host, control_port, active)
 - [x] `region_id` column on `tunnel_log` for per-region tunnel attribution
@@ -155,3 +167,6 @@ Items below are not committed to any release timeline. They represent directions
 | 0.3.1 | Multi-region server infrastructure — `regions` table, `region_id` on tunnel log, `GET /api/regions`, `[region]` server config |
 | 0.3.2 | Multi-region client — `--region` flag, `region:` config field, parallel latency probing, auto-select, 3-tier region discovery |
 | 0.3.6 | Unified dashboard — per-region health dots, region column in tunnels + history, region-aware request inspector; MCP `list_regions` tool + `region` param on `create_tunnel` |
+| 0.4.0 | Public platform launch — rustunnel.com with self-service registration, user dashboard, API key management, free tier |
+| 0.4.2 | Stripe billing — PAYG plan with metered bandwidth ($0.10/GB), spend cap, Stripe Customer Portal integration |
+| 0.4.6 | PAYG minimum fee — $3/month floor covering first 30 GB; overage charged via invoice webhook; TLS/HTTPS termination listed on all plans; custom subdomains gated by plan |

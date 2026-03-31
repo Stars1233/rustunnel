@@ -55,14 +55,17 @@ rustunnel --version
 ## Quick Start
 
 ```bash
-# 1. Create a config file interactively
+# 1. Get an auth token
+#    → Sign up at https://rustunnel.com, then go to Dashboard → API Keys → Create token
+
+# 2. Create a config file interactively
 rustunnel setup
 # → prompts for server address and auth token, writes ~/.rustunnel/config.yml
 
-# 2. Expose a local web server running on port 3000
+# 3. Expose a local web server running on port 3000
 rustunnel http 3000
 
-# 3. Expose a raw TCP service (e.g. SSH on port 22)
+# 4. Expose a raw TCP service (e.g. SSH on port 22)
 rustunnel tcp 22
 ```
 
@@ -426,7 +429,7 @@ Each delay has ±20% random jitter to prevent thundering-herd reconnects when a 
 
 The following errors cause an immediate exit — retrying would not help:
 
-- **Auth failed** — invalid or revoked token. Fix: run `rustunnel token create` and update your config.
+- **Auth failed** — invalid or revoked token. Fix: create a new token at [rustunnel.com](https://rustunnel.com) (Dashboard → API Keys) and update your config.
 - **Config error** — missing required fields. Fix: check your `~/.rustunnel/config.yml`.
 
 ### Disabling reconnect
@@ -508,7 +511,7 @@ Log output goes to **stderr**. Normal tunnel output (startup box, reconnect mess
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `config error: server address is required` | No `--server` flag and no config file | Add `server:` to `~/.rustunnel/config.yml` or pass `--server` |
-| `auth failed: <message>` | Token invalid or revoked | Create a new token with `rustunnel token create` |
+| `auth failed: <message>` | Token invalid or revoked | Create a new token at [rustunnel.com](https://rustunnel.com) (Dashboard → API Keys) or with `rustunnel token create` for self-hosted setups |
 | `tunnel error: <message>` | Subdomain already in use or server limit reached | Use a different `--subdomain` or wait |
 | `connection error: control WS: …` | Can't reach the server | Check network, firewall, and server address |
 | `connection error: heartbeat timeout` | Server stopped responding to pings | Transient — reconnect loop will retry |
