@@ -6,7 +6,9 @@
 
 ![rustunnel logo](images/rustunnel-logo-light.png)
 
-A ngrok-style secure tunnel server written in Rust. Expose local services through a public server over encrypted WebSocket connections with TLS termination, HTTP/TCP proxying, a live dashboard, Prometheus metrics, and audit logging.
+The open-source tunnel that scales with you. Don't pay for idle time. Secure, Rust-fast, and Pay-as-you-go.
+
+Expose local services through a public server over encrypted WebSocket connections with TLS termination, HTTP/TCP proxying, a live dashboard, Prometheus metrics, and audit logging.
 
 You can self-host or use our managed service.
 
