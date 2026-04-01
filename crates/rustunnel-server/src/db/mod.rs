@@ -345,6 +345,10 @@ pub struct AdminUser {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Number of API tokens belonging to this user.
     pub token_count: i64,
+    /// Name of the user's current plan (e.g. "free", "payg", "pro"), if any.
+    pub plan_name: Option<String>,
+    /// Status of the user's current subscription (e.g. "active", "past_due"), if any.
+    pub subscription_status: Option<String>,
 }
 
 /// Paginated list of all users (newest first).
@@ -356,7 +360,13 @@ pub async fn list_admin_users(
 ) -> Result<Vec<AdminUser>> {
     let rows: Vec<AdminUser> = sqlx::query_as(
         "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
-                COUNT(t.id)::bigint AS token_count
+                COUNT(t.id)::bigint AS token_count,
+                (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+                 WHERE s.user_id = u.id AND s.status != 'canceled'
+                 ORDER BY s.created_at DESC LIMIT 1) AS plan_name,
+                (SELECT s.status FROM subscriptions s
+                 WHERE s.user_id = u.id AND s.status != 'canceled'
+                 ORDER BY s.created_at DESC LIMIT 1) AS subscription_status
          FROM users u
          LEFT JOIN tokens t ON t.user_id = u.id
          WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
@@ -388,7 +398,13 @@ pub async fn count_admin_users(pool: &PgPool, search: Option<&str>) -> Result<i6
 pub async fn get_admin_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<AdminUser>> {
     let row: Option<AdminUser> = sqlx::query_as(
         "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
-                COUNT(t.id)::bigint AS token_count
+                COUNT(t.id)::bigint AS token_count,
+                (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+                 WHERE s.user_id = u.id AND s.status != 'canceled'
+                 ORDER BY s.created_at DESC LIMIT 1) AS plan_name,
+                (SELECT s.status FROM subscriptions s
+                 WHERE s.user_id = u.id AND s.status != 'canceled'
+                 ORDER BY s.created_at DESC LIMIT 1) AS subscription_status
          FROM users u
          LEFT JOIN tokens t ON t.user_id = u.id
          WHERE u.id = $1

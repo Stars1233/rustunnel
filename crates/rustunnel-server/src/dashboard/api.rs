@@ -750,8 +750,14 @@ async fn admin_platform_usage(
     if let Err(e) = require_admin(&headers, &state).await {
         return e.into_response();
     }
+    // Count live tunnels from in-memory state (matches the Tunnels tab source of truth).
+    let live_tunnels = (state.core.http_routes.len() + state.core.tcp_routes.len()) as i64;
+
     match db::get_platform_usage(&state.db.pg).await {
-        Ok(usage) => Json(usage).into_response(),
+        Ok(mut usage) => {
+            usage.active_tunnels_global = live_tunnels;
+            Json(usage).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrBody {
