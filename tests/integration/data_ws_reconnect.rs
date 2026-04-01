@@ -79,8 +79,7 @@ async fn data_ws_reconnect_preserves_tunnel() {
     let (_tunnel_id, assigned_port) = client.register_tcp_tunnel().await.expect("register");
 
     // 2. Connect the data bridge and verify the tunnel works.
-    let (ready_rx, abort_handle) =
-        connect_data_bridge_abortable(&server, session_id, local_addr);
+    let (ready_rx, abort_handle) = connect_data_bridge_abortable(&server, session_id, local_addr);
     ready_rx.await.expect("data bridge ready");
 
     verify_tunnel_echo(assigned_port, b"before-drop").await;
@@ -131,8 +130,7 @@ async fn data_ws_survives_multiple_reconnects() {
     }
 
     // Final reconnect — tunnel should still work.
-    let (ready_rx, _abort) =
-        connect_data_bridge_abortable(&server, session_id, local_addr);
+    let (ready_rx, _abort) = connect_data_bridge_abortable(&server, session_id, local_addr);
     ready_rx.await.expect("final data bridge ready");
     verify_tunnel_echo(assigned_port, b"final").await;
 }
