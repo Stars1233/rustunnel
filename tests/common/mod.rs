@@ -681,6 +681,76 @@ pub fn connect_data_bridge(
     ready_rx
 }
 
+/// Like `connect_data_bridge` but also returns an `AbortHandle` so the caller
+/// can forcibly kill the data WebSocket (simulating a NAT timeout or network
+/// drop) without touching the control WS.
+pub fn connect_data_bridge_abortable(
+    server: &TestServer,
+    session_id: Uuid,
+    local_addr: SocketAddr,
+) -> (tokio::sync::oneshot::Receiver<()>, AbortHandle) {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let url = format!(
+        "wss://127.0.0.1:{}/_data/{}",
+        server.control_port, session_id
+    );
+    let connector = Connector::Rustls(insecure_client_tls());
+
+    let handle = tokio::spawn(async move {
+        let (ws, _) = match tokio_tungstenite::connect_async_tls_with_config(
+            &url,
+            None,
+            false,
+            Some(connector),
+        )
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("[test data bridge] WS connect failed: {e}");
+                return;
+            }
+        };
+
+        let _ = ready_tx.send(());
+
+        let ws_compat = WsCompat::new(ws);
+        let mut conn = Connection::new(ws_compat, YamuxConfig::default(), Mode::Server);
+
+        loop {
+            match poll_fn(|cx| conn.poll_next_inbound(cx)).await {
+                Some(Ok(mut stream)) => {
+                    let mut id_bytes = [0u8; 16];
+                    if stream.read_exact(&mut id_bytes).await.is_err() {
+                        continue;
+                    }
+                    let _conn_id = Uuid::from_bytes(id_bytes);
+
+                    tokio::spawn(async move {
+                        match tokio::net::TcpStream::connect(local_addr).await {
+                            Ok(mut local) => {
+                                let mut remote = stream.compat();
+                                let _ =
+                                    tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+                            }
+                            Err(e) => {
+                                eprintln!("[test data bridge] connect {local_addr}: {e}");
+                            }
+                        }
+                    });
+                }
+                Some(Err(e)) => {
+                    eprintln!("[test data bridge] yamux error: {e}");
+                    break;
+                }
+                None => break,
+            }
+        }
+    });
+
+    (ready_rx, handle.abort_handle())
+}
+
 // ── yamux stream injection (legacy, kept for reference) ──────────────────────
 
 /// Yamux 0.13 uses a lazy SYN: the SYN frame is only sent when the opener

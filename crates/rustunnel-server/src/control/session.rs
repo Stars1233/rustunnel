@@ -17,6 +17,7 @@ use futures_util::io::AsyncWriteExt;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -113,97 +114,7 @@ where
         session_id,
     ));
 
-    let mut mux = MuxSession::start_detached();
-
-    // Store the loopback peer end so the data-plane bridge task can pick it
-    // up when the client's /_data/<session_id> WebSocket arrives.
-    if let Some(pipe) = mux.take_pipe_client() {
-        core.set_data_pipe(&session_id, pipe);
-    }
-
-    // Extract the raw yamux Connection and hand it to a dedicated driver task.
-    //
-    // yamux 0.13 uses lazy SYNs and requires the Connection to be polled
-    // continuously to flush outbound frames to the underlying IO (the duplex
-    // pipe that is bridged to the real data WebSocket).  The driver task:
-    //   • Accepts open-stream requests from the main loop via `open_rx`.
-    //   • For each request: opens an outbound stream (Mode::Client), writes
-    //     the 16-byte conn_id to force the SYN+DATA to be flushed, then hands
-    //     the stream to the edge task via `core.resolve_pending_conn`.
-    //   • Continuously polls `poll_next_inbound` (which also drives all
-    //     outbound IO) between requests.
-    let conn = mux.into_conn();
-    let (open_tx, mut open_rx) = mpsc::channel::<uuid::Uuid>(16);
-    let core_for_driver = Arc::clone(core);
-    tokio::spawn(async move {
-        let mut conn = conn;
-        loop {
-            tokio::select! {
-                req = open_rx.recv() => {
-                    let conn_id = match req { None => break, Some(id) => id };
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        poll_fn(|cx| conn.poll_new_outbound(cx)),
-                    )
-                    .await
-                    {
-                        Ok(Ok(mut stream)) => {
-                            // Spawn a separate task to write the conn_id bytes and
-                            // hand the stream to the waiting edge task. This returns
-                            // the driver loop to poll_next_inbound immediately so
-                            // yamux flow-control frames are not blocked by the write.
-                            //
-                            // yamux streams communicate with the Connection via an
-                            // internal mpsc channel, so write_all + flush complete
-                            // quickly (they queue frames rather than write to the
-                            // network). The Connection task drains them on the next
-                            // poll_next_inbound call.
-                            let core = Arc::clone(&core_for_driver);
-                            tokio::spawn(async move {
-                                if stream.write_all(conn_id.as_bytes()).await.is_err()
-                                    || stream.flush().await.is_err()
-                                {
-                                    tracing::warn!(%conn_id, "failed to write/flush yamux stream");
-                                    return;
-                                }
-                                if !core.resolve_pending_conn(&conn_id, stream) {
-                                    tracing::warn!(%conn_id, "no edge task waiting for this conn_id");
-                                }
-                            });
-                        }
-                        Ok(Err(e)) => tracing::warn!(%conn_id, "yamux open_stream: {e}"),
-                        Err(_) => {
-                            // poll_new_outbound blocked — likely a yamux flow-control
-                            // deadlock (window exhausted while poll_next_inbound is not
-                            // being called). Break the deadlock and return a fast error
-                            // to the waiting edge task.
-                            tracing::warn!(%conn_id, "yamux open_stream timed out — breaking potential deadlock");
-                            core_for_driver.cancel_pending_conn(&conn_id);
-                        }
-                    }
-                }
-
-                // poll_next_inbound drives ALL yamux IO (including flushing
-                // outbound frames written above).  In Mode::Client the server
-                // will never receive genuine inbound streams, so any that
-                // arrive are simply discarded.
-                result = poll_fn(|cx| conn.poll_next_inbound(cx)) => {
-                    match result {
-                        Some(Ok(_)) => tracing::debug!("unexpected inbound yamux stream — ignored"),
-                        Some(Err(e)) => { tracing::debug!("yamux driver error: {e}"); break; }
-                        None => { tracing::debug!("yamux connection closed"); break; }
-                    }
-                }
-            }
-        }
-        // Drain any connection requests that arrived while the driver was
-        // exiting.  Each waiting edge task holds a oneshot receiver; removing
-        // the sender here causes RecvError immediately, so edge tasks get a
-        // fast 502 instead of waiting out the full STREAM_TIMEOUT.
-        while let Ok(conn_id) = open_rx.try_recv() {
-            core_for_driver.cancel_pending_conn(&conn_id);
-        }
-    });
+    let (open_tx, driver_handle) = spawn_yamux_driver(core, session_id);
 
     let ctx = SessionCtx {
         session_id,
@@ -221,6 +132,7 @@ where
         pong_in_tx,
         &ctx,
         open_tx,
+        driver_handle,
     )
     .await;
 
@@ -369,7 +281,8 @@ async fn main_loop<S>(
     ping_out_rx: &mut mpsc::Receiver<u64>,
     pong_in_tx: mpsc::Sender<u64>,
     ctx: &SessionCtx<'_>,
-    open_tx: mpsc::Sender<uuid::Uuid>,
+    mut open_tx: mpsc::Sender<uuid::Uuid>,
+    mut driver_handle: JoinHandle<()>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -421,24 +334,118 @@ where
                         // stream to the waiting edge task.
                         if open_tx.send(conn_id).await.is_err() {
                             // The driver exited (data WebSocket dropped). Cancel
-                            // the pending conn so the edge task gets a fast 502
-                            // instead of waiting out the full STREAM_TIMEOUT.
-                            tracing::warn!(%session_id, "yamux driver exited — terminating session");
+                            // the pending conn so the edge task gets a fast 502.
+                            // The driver_handle arm will rebuild the data plane.
+                            tracing::warn!(%session_id, %conn_id, "yamux driver dead — cancelling connection");
                             ctx.core.cancel_pending_conn(&conn_id);
-                            return Err(Error::Mux("yamux driver exited".into()));
+                        } else {
+                            // Notify the client so it can correlate the arriving
+                            // yamux stream with the local service to proxy.
+                            send_frame(ws, &ControlFrame::NewConnection {
+                                conn_id,
+                                client_addr: client_addr.to_string(),
+                                protocol,
+                            }).await?;
                         }
-                        // Notify the client so it can correlate the arriving
-                        // yamux stream with the local service to proxy.
-                        send_frame(ws, &ControlFrame::NewConnection {
-                            conn_id,
-                            client_addr: client_addr.to_string(),
-                            protocol,
-                        }).await?;
+                    }
+                }
+            }
+
+            // Yamux driver task exited — data WebSocket dropped or yamux error.
+            // Rebuild the data plane so the client can reconnect /_data/<session_id>
+            // without tearing down the control WS or re-registering tunnels.
+            _ = &mut driver_handle => {
+                tracing::warn!(%session_id, "yamux driver exited — rebuilding data plane for reconnect");
+                let (new_open_tx, new_handle) = spawn_yamux_driver(ctx.core, session_id);
+                open_tx = new_open_tx;
+                driver_handle = new_handle;
+            }
+        }
+    }
+}
+
+// ── yamux driver ─────────────────────────────────────────────────────────
+
+/// Create a new `MuxSession`, store its loopback pipe in the session, and
+/// spawn the yamux driver task that opens outbound streams for each
+/// `NewConnection`.
+///
+/// Returns the channel sender for open-stream requests and the driver's
+/// `JoinHandle` (so the main loop can detect driver exit and rebuild).
+fn spawn_yamux_driver(
+    core: &Arc<TunnelCore>,
+    session_id: Uuid,
+) -> (mpsc::Sender<Uuid>, JoinHandle<()>) {
+    let mut mux = MuxSession::start_detached();
+    if let Some(pipe) = mux.take_pipe_client() {
+        core.set_data_pipe(&session_id, pipe);
+    }
+    let conn = mux.into_conn();
+    let (open_tx, mut open_rx) = mpsc::channel::<Uuid>(16);
+    let core_clone = Arc::clone(core);
+
+    // yamux 0.13 uses lazy SYNs and requires the Connection to be polled
+    // continuously to flush outbound frames to the underlying IO (the duplex
+    // pipe that is bridged to the real data WebSocket).  The driver task:
+    //   • Accepts open-stream requests from the main loop via `open_rx`.
+    //   • For each request: opens an outbound stream (Mode::Client), writes
+    //     the 16-byte conn_id to force the SYN+DATA to be flushed, then hands
+    //     the stream to the edge task via `core.resolve_pending_conn`.
+    //   • Continuously polls `poll_next_inbound` (which also drives all
+    //     outbound IO) between requests.
+    let handle = tokio::spawn(async move {
+        let mut conn = conn;
+        loop {
+            tokio::select! {
+                req = open_rx.recv() => {
+                    let conn_id = match req { None => break, Some(id) => id };
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        poll_fn(|cx| conn.poll_new_outbound(cx)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(mut stream)) => {
+                            let core = Arc::clone(&core_clone);
+                            tokio::spawn(async move {
+                                if stream.write_all(conn_id.as_bytes()).await.is_err()
+                                    || stream.flush().await.is_err()
+                                {
+                                    tracing::warn!(%conn_id, "failed to write/flush yamux stream");
+                                    return;
+                                }
+                                if !core.resolve_pending_conn(&conn_id, stream) {
+                                    tracing::warn!(%conn_id, "no edge task waiting for this conn_id");
+                                }
+                            });
+                        }
+                        Ok(Err(e)) => tracing::warn!(%conn_id, "yamux open_stream: {e}"),
+                        Err(_) => {
+                            tracing::warn!(%conn_id, "yamux open_stream timed out — breaking potential deadlock");
+                            core_clone.cancel_pending_conn(&conn_id);
+                        }
+                    }
+                }
+
+                result = poll_fn(|cx| conn.poll_next_inbound(cx)) => {
+                    match result {
+                        Some(Ok(_)) => tracing::debug!("unexpected inbound yamux stream — ignored"),
+                        Some(Err(e)) => { tracing::debug!("yamux driver error: {e}"); break; }
+                        None => { tracing::debug!("yamux connection closed"); break; }
                     }
                 }
             }
         }
-    }
+        // Drain any connection requests that arrived while the driver was
+        // exiting.  Each waiting edge task holds a oneshot receiver; removing
+        // the sender here causes RecvError immediately, so edge tasks get a
+        // fast 502 instead of waiting out the full STREAM_TIMEOUT.
+        while let Ok(conn_id) = open_rx.try_recv() {
+            core_clone.cancel_pending_conn(&conn_id);
+        }
+    });
+
+    (open_tx, handle)
 }
 
 // ── frame dispatch ────────────────────────────────────────────────────────────

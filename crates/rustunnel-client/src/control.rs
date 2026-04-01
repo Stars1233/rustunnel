@@ -58,6 +58,9 @@ use crate::proxy;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_DEADLINE: Duration = Duration::from_secs(10);
+const DATA_WS_RECONNECT_DELAY: Duration = Duration::from_millis(200);
+const DATA_WS_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+const DATA_WS_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 
 // ── insecure TLS (local dev only) ─────────────────────────────────────────────
 
@@ -349,7 +352,15 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     display::print_startup_box(&display_tunnels);
 
     // 6. Main event loop ——————————————————————————————————————————————————
-    main_loop(&mut ctrl_ws, stream_rx, &registered).await
+    main_loop(
+        &mut ctrl_ws,
+        stream_rx,
+        &registered,
+        &config.server,
+        session_id,
+        config.insecure,
+    )
+    .await
 }
 
 // ── main loop ─────────────────────────────────────────────────────────────────
@@ -358,6 +369,9 @@ async fn main_loop(
     ctrl_ws: &mut CtrlWs,
     mut stream_rx: mpsc::Receiver<(Uuid, YamuxStream)>,
     registered: &[(TunnelDef, String)],
+    server: &str,
+    session_id: Uuid,
+    insecure: bool,
 ) -> Result<()> {
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip the immediate first tick
@@ -409,10 +423,31 @@ async fn main_loop(
                     }
                     None => {
                         // The yamux driver exited (data WebSocket dropped or
-                        // yamux error). Return an error to trigger reconnect.
-                        return Err(Error::Connection(
-                            "yamux data connection closed".into(),
-                        ));
+                        // yamux error). Reconnect the data WS independently
+                        // without tearing down the control WS or re-registering
+                        // tunnels.
+                        warn!("data WebSocket dropped — reconnecting");
+                        pending_conns.clear();
+                        pending_streams.clear();
+                        tokio::time::sleep(DATA_WS_RECONNECT_DELAY).await;
+                        let mut reconnected = false;
+                        for attempt in 1..=DATA_WS_RECONNECT_MAX_ATTEMPTS {
+                            if let Some(conn) = connect_data_ws(server, session_id, insecure).await {
+                                let (new_tx, new_rx) = mpsc::channel::<(Uuid, YamuxStream)>(16);
+                                tokio::spawn(drive_client_mux(conn, new_tx));
+                                stream_rx = new_rx;
+                                reconnected = true;
+                                info!(attempt, "data WebSocket reconnected");
+                                break;
+                            }
+                            debug!(attempt, "data WS reconnect attempt failed — retrying");
+                            tokio::time::sleep(DATA_WS_RECONNECT_INTERVAL).await;
+                        }
+                        if !reconnected {
+                            return Err(Error::Connection(
+                                "failed to reconnect data WebSocket".into(),
+                            ));
+                        }
                     }
                 }
             }
