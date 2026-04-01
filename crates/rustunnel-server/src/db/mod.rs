@@ -77,7 +77,7 @@ pub async fn create_token(
     label: &str,
     scope: Option<&str>,
 ) -> Result<(Token, String)> {
-    let raw = Uuid::new_v4().to_string();
+    let raw = format!("rt_live_{}", Uuid::new_v4());
     let hash = hash_token(&raw);
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
