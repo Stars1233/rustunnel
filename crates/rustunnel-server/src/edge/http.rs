@@ -375,14 +375,16 @@ async fn proxy_request(
             req,
             yamux_stream,
             bytes_counter,
-            ctx.capture_tx.clone(),
-            conn_id,
-            tunnel_info.tunnel_id,
-            subdomain.clone(),
-            method,
-            path,
-            request_bytes,
-            start,
+            HttpCaptureCtx {
+                tx: ctx.capture_tx.clone(),
+                conn_id,
+                tunnel_id: tunnel_info.tunnel_id,
+                tunnel_label: subdomain.clone(),
+                method,
+                path,
+                request_bytes,
+                start,
+            },
         ),
     )
     .await
@@ -407,11 +409,9 @@ async fn proxy_request(
 
 // ── HTTP forwarding via hyper client ─────────────────────────────────────────
 
-async fn forward_http(
-    req: Request<Incoming>,
-    yamux_stream: YamuxStream,
-    bytes_counter: Arc<std::sync::atomic::AtomicU64>,
-    capture_tx: Option<CaptureTx>,
+/// Capture-related context passed into `forward_http`.
+struct HttpCaptureCtx {
+    tx: Option<CaptureTx>,
     conn_id: Uuid,
     tunnel_id: Uuid,
     tunnel_label: String,
@@ -419,6 +419,13 @@ async fn forward_http(
     path: String,
     request_bytes: u64,
     start: Instant,
+}
+
+async fn forward_http(
+    req: Request<Incoming>,
+    yamux_stream: YamuxStream,
+    bytes_counter: Arc<std::sync::atomic::AtomicU64>,
+    capture: HttpCaptureCtx,
 ) -> Result<Response<BoxBody>, Box<dyn std::error::Error + Send + Sync>> {
     // Bridge yamux (futures::io) → tokio::io → hyper::rt IO.
     let io = TokioIo::new(yamux_stream.compat());
@@ -459,19 +466,9 @@ async fn forward_http(
             sender,
             bytes_counter,
             0u64,
-            Some((
-                capture_tx,
-                conn_id,
-                tunnel_id,
-                tunnel_label,
-                method,
-                path,
-                status,
-                request_bytes,
-                start,
-            )),
+            Some((capture, status)),
         ),
-        |(mut body, sender, counter, mut rsp_bytes, capture)| async move {
+        |(mut body, sender, counter, mut rsp_bytes, cap)| async move {
             match body.frame().await {
                 Some(Ok(f)) => {
                     if let Some(data) = f.data_ref() {
@@ -481,24 +478,24 @@ async fn forward_http(
                     }
                     Some((
                         Ok::<Frame<Bytes>, Infallible>(f),
-                        (body, sender, counter, rsp_bytes, capture),
+                        (body, sender, counter, rsp_bytes, cap),
                     ))
                 }
                 _ => {
                     // Body fully consumed — emit capture with actual byte count.
-                    if let Some((tx, cid, tid, label, meth, pth, st, req_b, t0)) = capture {
+                    if let Some((c, st)) = cap {
                         emit_capture(
-                            &tx,
+                            &c.tx,
                             CaptureEvent {
-                                conn_id: cid,
-                                tunnel_id: tid,
-                                tunnel_label: label,
-                                method: meth,
-                                path: pth,
+                                conn_id: c.conn_id,
+                                tunnel_id: c.tunnel_id,
+                                tunnel_label: c.tunnel_label,
+                                method: c.method,
+                                path: c.path,
                                 status: st,
-                                request_bytes: req_b,
+                                request_bytes: c.request_bytes,
                                 response_bytes: rsp_bytes,
-                                duration_ms: t0.elapsed().as_millis() as u64,
+                                duration_ms: c.start.elapsed().as_millis() as u64,
                                 captured_at: SystemTime::now(),
                             },
                         );
