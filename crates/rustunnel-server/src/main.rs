@@ -360,7 +360,8 @@ fn init_sentry(config: &ServerConfig) -> sentry::ClientInitGuard {
                     .into(),
             ),
             send_default_pii: true,
-            traces_sample_rate: 0.2,
+            traces_sample_rate: 1.0,
+            enable_logs: true,
             ..Default::default()
         },
     ))
