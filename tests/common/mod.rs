@@ -246,6 +246,7 @@ impl TestServer {
                 level: "warn".to_string(),
                 format: "pretty".to_string(),
                 audit_log_path: None,
+                sentry_dsn: None,
             },
             limits: LimitsSection {
                 max_tunnels_per_session: 10,

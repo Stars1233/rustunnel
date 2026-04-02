@@ -48,3 +48,5 @@ rcgen = { workspace = true }
 arc-swap = { workspace = true }
 x509-parser = { workspace = true }
 socket2 = { workspace = true }
+sentry = { workspace = true }
+sentry-tracing = { workspace = true }
