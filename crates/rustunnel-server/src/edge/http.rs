@@ -371,7 +371,21 @@ async fn proxy_request(
 
     let resp = match timeout(
         PROXY_TIMEOUT,
-        forward_http(req, yamux_stream, bytes_counter),
+        forward_http(
+            req,
+            yamux_stream,
+            bytes_counter,
+            HttpCaptureCtx {
+                tx: ctx.capture_tx.clone(),
+                conn_id,
+                tunnel_id: tunnel_info.tunnel_id,
+                tunnel_label: subdomain.clone(),
+                method,
+                path,
+                request_bytes,
+                start,
+            },
+        ),
     )
     .await
     {
@@ -387,43 +401,72 @@ async fn proxy_request(
     };
 
     let status = resp.status().as_u16();
-    // Response bytes are counted inside the streaming body (per frame via
-    // bytes_counter), so use Content-Length here only for the capture event.
-    let response_bytes_hint = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
     let duration_ms = start.elapsed().as_millis() as u64;
-
     info!(%conn_id, subdomain, status, duration_ms, "request complete");
-
-    emit_capture(
-        &ctx.capture_tx,
-        CaptureEvent {
-            conn_id,
-            tunnel_id: tunnel_info.tunnel_id,
-            tunnel_label: subdomain,
-            method,
-            path,
-            status,
-            request_bytes,
-            response_bytes: response_bytes_hint,
-            duration_ms,
-            captured_at: SystemTime::now(),
-        },
-    );
 
     resp
 }
 
 // ── HTTP forwarding via hyper client ─────────────────────────────────────────
 
+/// Capture-related context passed into `forward_http`.
+struct HttpCaptureCtx {
+    tx: Option<CaptureTx>,
+    conn_id: Uuid,
+    tunnel_id: Uuid,
+    tunnel_label: String,
+    method: String,
+    path: String,
+    request_bytes: u64,
+    start: Instant,
+}
+
+/// RAII guard that emits the capture event when dropped.
+///
+/// Placing this in the unfold body-stream state means the event fires
+/// regardless of how the stream ends — normal exhaustion, early client
+/// disconnect, or server-side drop — giving a reliable capture with the
+/// bytes actually transferred up to that point.
+struct CaptureGuard {
+    tx: Option<CaptureTx>,
+    conn_id: Uuid,
+    tunnel_id: Uuid,
+    tunnel_label: String,
+    method: String,
+    path: String,
+    status: u16,
+    request_bytes: u64,
+    response_bytes: Arc<std::sync::atomic::AtomicU64>,
+    start: Instant,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        emit_capture(
+            &self.tx,
+            CaptureEvent {
+                conn_id: self.conn_id,
+                tunnel_id: self.tunnel_id,
+                tunnel_label: std::mem::take(&mut self.tunnel_label),
+                method: std::mem::take(&mut self.method),
+                path: std::mem::take(&mut self.path),
+                status: self.status,
+                request_bytes: self.request_bytes,
+                response_bytes: self
+                    .response_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                duration_ms: self.start.elapsed().as_millis() as u64,
+                captured_at: SystemTime::now(),
+            },
+        );
+    }
+}
+
 async fn forward_http(
     req: Request<Incoming>,
     yamux_stream: YamuxStream,
     bytes_counter: Arc<std::sync::atomic::AtomicU64>,
+    capture: HttpCaptureCtx,
 ) -> Result<Response<BoxBody>, Box<dyn std::error::Error + Send + Sync>> {
     // Bridge yamux (futures::io) → tokio::io → hyper::rt IO.
     let io = TokioIo::new(yamux_stream.compat());
@@ -446,22 +489,50 @@ async fn forward_http(
     let upstream = sender.send_request(fwd_req).await?;
 
     let (mut resp_parts, resp_body) = upstream.into_parts();
+    let status = resp_parts.status.as_u16();
     remove_hop_by_hop(&mut resp_parts.headers);
+
+    // Shared counter incremented per body frame; read by CaptureGuard on drop.
+    let rsp_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let guard = CaptureGuard {
+        tx: capture.tx,
+        conn_id: capture.conn_id,
+        tunnel_id: capture.tunnel_id,
+        tunnel_label: capture.tunnel_label,
+        method: capture.method,
+        path: capture.path,
+        status,
+        request_bytes: capture.request_bytes,
+        response_bytes: rsp_bytes.clone(),
+        start: capture.start,
+    };
 
     // Stream the response body frame-by-frame so the browser receives the
     // first bytes as soon as the local service starts responding (TTFB fix).
     // `sender` is moved into the unfold state to keep the upstream HTTP/1.1
     // connection alive for the entire duration of the body transfer.
+    //
+    // `guard` lives in the unfold state so that CaptureGuard::drop fires with
+    // the actual response_bytes whenever the stream ends — normal completion,
+    // early client disconnect, or any other drop path.
     let body_stream = futures_util::stream::unfold(
-        (resp_body, sender, bytes_counter),
-        |(mut body, sender, counter)| async move {
+        (resp_body, sender, bytes_counter, rsp_bytes, guard),
+        |(mut body, sender, counter, rsp_bytes, guard)| async move {
             match body.frame().await {
                 Some(Ok(f)) => {
                     if let Some(data) = f.data_ref() {
-                        counter.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        let n = data.len() as u64;
+                        counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                        rsp_bytes.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                     }
-                    Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender, counter)))
+                    Some((
+                        Ok::<Frame<Bytes>, Infallible>(f),
+                        (body, sender, counter, rsp_bytes, guard),
+                    ))
                 }
+                // Stream exhausted or errored — returning None drops the state,
+                // which drops `guard`, firing CaptureGuard::drop.
                 _ => None,
             }
         },
