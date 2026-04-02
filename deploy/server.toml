@@ -90,6 +90,11 @@ format = "json"
 # token create/delete, and admin actions.  Comment out to disable.
 audit_log_path = "/var/lib/rustunnel/audit.log"
 
+# Sentry DSN for error tracking and performance monitoring.
+# Prefer passing via SENTRY_DSN environment variable.
+# Omit or leave empty to disable.
+sentry_dsn = ""
+
 # ── Region ────────────────────────────────────────────────────────────────────
 # Identity of this server instance within the multi-region fleet.
 # The id must match a row in the `regions` table (seeded by migration 0004).

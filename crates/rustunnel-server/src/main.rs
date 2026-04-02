@@ -82,6 +82,10 @@ async fn main() {
         }
     };
 
+    // Initialise Sentry before tracing so panics are captured immediately.
+    // The guard must outlive the entire process — dropping it flushes events.
+    let _sentry_guard = init_sentry(&config);
+
     init_tracing(&config);
 
     if let Err(e) = run(config).await {
@@ -337,6 +341,31 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
         .unwrap()
 }
 
+// ── Sentry initialisation ────────────────────────────────────────────────────
+
+fn init_sentry(config: &ServerConfig) -> sentry::ClientInitGuard {
+    // DSN priority: SENTRY_DSN env var > config file > disabled.
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .or_else(|| config.logging.sentry_dsn.clone())
+        .unwrap_or_default();
+
+    sentry::init((
+        dsn,
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            environment: Some(
+                std::env::var("SENTRY_ENVIRONMENT")
+                    .unwrap_or_else(|_| "production".into())
+                    .into(),
+            ),
+            send_default_pii: true,
+            traces_sample_rate: 0.2,
+            ..Default::default()
+        },
+    ))
+}
+
 // ── tracing initialisation ────────────────────────────────────────────────────
 
 fn init_tracing(config: &ServerConfig) {
@@ -349,11 +378,13 @@ fn init_tracing(config: &ServerConfig) {
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().json())
+            .with(sentry_tracing::layer())
             .init();
     } else {
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().pretty())
+            .with(sentry_tracing::layer())
             .init();
     }
 }

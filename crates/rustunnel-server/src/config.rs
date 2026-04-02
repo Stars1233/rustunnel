@@ -146,6 +146,12 @@ pub struct LoggingSection {
     /// Optional path for the audit log file (JSON-lines).  Omit to disable.
     #[serde(default)]
     pub audit_log_path: Option<String>,
+
+    /// Sentry DSN for error tracking and performance monitoring.
+    /// Prefer supplying via `SENTRY_DSN` environment variable.
+    /// Omit or leave empty to disable Sentry.
+    #[serde(default)]
+    pub sentry_dsn: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,6 +227,7 @@ impl Default for ServerConfig {
                 level: "info".to_string(),
                 format: "pretty".to_string(),
                 audit_log_path: None,
+                sentry_dsn: None,
             },
             limits: LimitsSection {
                 max_tunnels_per_session: 10,
