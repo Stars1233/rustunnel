@@ -12,6 +12,7 @@ This document tracks the features that have already shipped and ideas planned fo
 - [x] TCP tunnel proxying with dynamic port allocation from a configurable range
 - [x] yamux stream multiplexing over a single WebSocket connection
 - [x] Automatic client reconnection with configurable retry logic
+- [x] Independent data WebSocket reconnect — data plane failures no longer tear down the control session; tunnels keep their subdomain/port (v0.4.10+)
 - [x] Graceful shutdown — drains active sessions with a 30-second timeout on SIGINT/SIGTERM
 
 ### TLS & security
@@ -170,3 +171,4 @@ Items below are not committed to any release timeline. They represent directions
 | 0.4.0 | Public platform launch — rustunnel.com with self-service registration, user dashboard, API key management, free tier |
 | 0.4.2 | Stripe billing — PAYG plan with metered bandwidth ($0.10/GB), spend cap, Stripe Customer Portal integration |
 | 0.4.6 | PAYG minimum fee — $3/month floor covering first 30 GB; overage charged via invoice webhook; TLS/HTTPS termination listed on all plans; custom subdomains gated by plan |
+| 0.4.10 | Zero-downtime data WebSocket reconnect — when the data plane drops (NAT timeout, network blip), the client reconnects only the data WebSocket without re-authenticating or re-registering tunnels; same subdomain/port preserved. Server-side change is backwards compatible with older clients. |

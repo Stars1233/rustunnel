@@ -42,3 +42,7 @@ path = "integration/tcp_tunnel.rs"
 [[test]]
 name = "reconnect"
 path = "integration/reconnect.rs"
+
+[[test]]
+name = "data_ws_reconnect"
+path = "integration/data_ws_reconnect.rs"
