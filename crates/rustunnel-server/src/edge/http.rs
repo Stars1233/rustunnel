@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::{Frame, Incoming};
 use hyper::header::HOST;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -356,9 +356,25 @@ async fn proxy_request(
     }
 
     // ── 7. HTTP proxy ─────────────────────────────────────────────────────
-    let request_bytes = req.body().size_hint().upper().unwrap_or(0);
+    // Use Content-Length header for request size (size_hint on streaming
+    // bodies returns None, so the old `.upper().unwrap_or(0)` was always 0).
+    let request_bytes = req
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
 
-    let resp = match timeout(PROXY_TIMEOUT, forward_http(req, yamux_stream)).await {
+    let bytes_counter = tunnel_info.bytes_proxied.clone();
+    // Count request bytes up front.
+    bytes_counter.fetch_add(request_bytes, std::sync::atomic::Ordering::Relaxed);
+
+    let resp = match timeout(
+        PROXY_TIMEOUT,
+        forward_http(req, yamux_stream, bytes_counter),
+    )
+    .await
+    {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             warn!(%conn_id, "proxy error: {e}");
@@ -371,15 +387,17 @@ async fn proxy_request(
     };
 
     let status = resp.status().as_u16();
-    let response_bytes = resp.body().size_hint().upper().unwrap_or(0);
+    // Response bytes are counted inside the streaming body (per frame via
+    // bytes_counter), so use Content-Length here only for the capture event.
+    let response_bytes_hint = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     info!(%conn_id, subdomain, status, duration_ms, "request complete");
-
-    tunnel_info.bytes_proxied.fetch_add(
-        request_bytes + response_bytes,
-        std::sync::atomic::Ordering::Relaxed,
-    );
 
     emit_capture(
         &ctx.capture_tx,
@@ -391,7 +409,7 @@ async fn proxy_request(
             path,
             status,
             request_bytes,
-            response_bytes,
+            response_bytes: response_bytes_hint,
             duration_ms,
             captured_at: SystemTime::now(),
         },
@@ -405,6 +423,7 @@ async fn proxy_request(
 async fn forward_http(
     req: Request<Incoming>,
     yamux_stream: YamuxStream,
+    bytes_counter: Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<Response<BoxBody>, Box<dyn std::error::Error + Send + Sync>> {
     // Bridge yamux (futures::io) → tokio::io → hyper::rt IO.
     let io = TokioIo::new(yamux_stream.compat());
@@ -433,13 +452,20 @@ async fn forward_http(
     // first bytes as soon as the local service starts responding (TTFB fix).
     // `sender` is moved into the unfold state to keep the upstream HTTP/1.1
     // connection alive for the entire duration of the body transfer.
-    let body_stream =
-        futures_util::stream::unfold((resp_body, sender), |(mut body, sender)| async move {
+    let body_stream = futures_util::stream::unfold(
+        (resp_body, sender, bytes_counter),
+        |(mut body, sender, counter)| async move {
             match body.frame().await {
-                Some(Ok(f)) => Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender))),
+                Some(Ok(f)) => {
+                    if let Some(data) = f.data_ref() {
+                        counter.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender, counter)))
+                }
                 _ => None,
             }
-        });
+        },
+    );
 
     Ok(Response::from_parts(
         resp_parts,
