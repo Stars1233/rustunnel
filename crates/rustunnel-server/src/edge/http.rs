@@ -454,7 +454,23 @@ async fn forward_http(
     // often-absent Content-Length header hint.
     // `rsp_bytes` is a plain u64 owned by the unfold state — no Arc needed.
     let body_stream = futures_util::stream::unfold(
-        (resp_body, sender, bytes_counter, 0u64, Some((capture_tx, conn_id, tunnel_id, tunnel_label, method, path, status, request_bytes, start))),
+        (
+            resp_body,
+            sender,
+            bytes_counter,
+            0u64,
+            Some((
+                capture_tx,
+                conn_id,
+                tunnel_id,
+                tunnel_label,
+                method,
+                path,
+                status,
+                request_bytes,
+                start,
+            )),
+        ),
         |(mut body, sender, counter, mut rsp_bytes, capture)| async move {
             match body.frame().await {
                 Some(Ok(f)) => {
@@ -463,7 +479,10 @@ async fn forward_http(
                         counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                         rsp_bytes += n;
                     }
-                    Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender, counter, rsp_bytes, capture)))
+                    Some((
+                        Ok::<Frame<Bytes>, Infallible>(f),
+                        (body, sender, counter, rsp_bytes, capture),
+                    ))
                 }
                 _ => {
                     // Body fully consumed — emit capture with actual byte count.
