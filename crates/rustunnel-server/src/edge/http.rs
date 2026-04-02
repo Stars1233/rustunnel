@@ -371,7 +371,19 @@ async fn proxy_request(
 
     let resp = match timeout(
         PROXY_TIMEOUT,
-        forward_http(req, yamux_stream, bytes_counter),
+        forward_http(
+            req,
+            yamux_stream,
+            bytes_counter,
+            ctx.capture_tx.clone(),
+            conn_id,
+            tunnel_info.tunnel_id,
+            subdomain.clone(),
+            method,
+            path,
+            request_bytes,
+            start,
+        ),
     )
     .await
     {
@@ -387,33 +399,8 @@ async fn proxy_request(
     };
 
     let status = resp.status().as_u16();
-    // Response bytes are counted inside the streaming body (per frame via
-    // bytes_counter), so use Content-Length here only for the capture event.
-    let response_bytes_hint = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
     let duration_ms = start.elapsed().as_millis() as u64;
-
     info!(%conn_id, subdomain, status, duration_ms, "request complete");
-
-    emit_capture(
-        &ctx.capture_tx,
-        CaptureEvent {
-            conn_id,
-            tunnel_id: tunnel_info.tunnel_id,
-            tunnel_label: subdomain,
-            method,
-            path,
-            status,
-            request_bytes,
-            response_bytes: response_bytes_hint,
-            duration_ms,
-            captured_at: SystemTime::now(),
-        },
-    );
 
     resp
 }
@@ -424,6 +411,14 @@ async fn forward_http(
     req: Request<Incoming>,
     yamux_stream: YamuxStream,
     bytes_counter: Arc<std::sync::atomic::AtomicU64>,
+    capture_tx: Option<CaptureTx>,
+    conn_id: Uuid,
+    tunnel_id: Uuid,
+    tunnel_label: String,
+    method: String,
+    path: String,
+    request_bytes: u64,
+    start: Instant,
 ) -> Result<Response<BoxBody>, Box<dyn std::error::Error + Send + Sync>> {
     // Bridge yamux (futures::io) → tokio::io → hyper::rt IO.
     let io = TokioIo::new(yamux_stream.compat());
@@ -446,23 +441,51 @@ async fn forward_http(
     let upstream = sender.send_request(fwd_req).await?;
 
     let (mut resp_parts, resp_body) = upstream.into_parts();
+    let status = resp_parts.status.as_u16();
     remove_hop_by_hop(&mut resp_parts.headers);
 
     // Stream the response body frame-by-frame so the browser receives the
     // first bytes as soon as the local service starts responding (TTFB fix).
     // `sender` is moved into the unfold state to keep the upstream HTTP/1.1
     // connection alive for the entire duration of the body transfer.
+    //
+    // The capture event is emitted from the `None` arm (stream end) so that
+    // `response_bytes` reflects the actual bytes transferred rather than the
+    // often-absent Content-Length header hint.
+    // `rsp_bytes` is a plain u64 owned by the unfold state — no Arc needed.
     let body_stream = futures_util::stream::unfold(
-        (resp_body, sender, bytes_counter),
-        |(mut body, sender, counter)| async move {
+        (resp_body, sender, bytes_counter, 0u64, Some((capture_tx, conn_id, tunnel_id, tunnel_label, method, path, status, request_bytes, start))),
+        |(mut body, sender, counter, mut rsp_bytes, capture)| async move {
             match body.frame().await {
                 Some(Ok(f)) => {
                     if let Some(data) = f.data_ref() {
-                        counter.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        let n = data.len() as u64;
+                        counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                        rsp_bytes += n;
                     }
-                    Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender, counter)))
+                    Some((Ok::<Frame<Bytes>, Infallible>(f), (body, sender, counter, rsp_bytes, capture)))
                 }
-                _ => None,
+                _ => {
+                    // Body fully consumed — emit capture with actual byte count.
+                    if let Some((tx, cid, tid, label, meth, pth, st, req_b, t0)) = capture {
+                        emit_capture(
+                            &tx,
+                            CaptureEvent {
+                                conn_id: cid,
+                                tunnel_id: tid,
+                                tunnel_label: label,
+                                method: meth,
+                                path: pth,
+                                status: st,
+                                request_bytes: req_b,
+                                response_bytes: rsp_bytes,
+                                duration_ms: t0.elapsed().as_millis() as u64,
+                                captured_at: SystemTime::now(),
+                            },
+                        );
+                    }
+                    None
+                }
             }
         },
     );
