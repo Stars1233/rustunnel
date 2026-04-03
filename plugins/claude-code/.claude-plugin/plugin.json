@@ -1,0 +1,29 @@
+{
+  "name": "rustunnel",
+  "version": "1.0.0",
+  "description": "Expose local services via secure tunnels. Create public HTTPS/TCP URLs for webhooks, demos, and AI agent workflows.",
+  "author": {
+    "name": "rustunnel",
+    "url": "https://rustunnel.com"
+  },
+  "homepage": "https://docs.rustunnel.com/guides/mcp-server",
+  "repository": "https://github.com/joaoh82/rustunnel",
+  "license": "MIT",
+  "keywords": ["tunnel", "ngrok", "expose", "webhook", "devops", "mcp", "networking"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "server": {
+      "description": "Tunnel server address (e.g. eu.edge.rustunnel.com:4040 for hosted, or localhost:4040 for self-hosted)",
+      "sensitive": false
+    },
+    "api_url": {
+      "description": "Dashboard API URL (e.g. https://eu.edge.rustunnel.com:8443 for hosted, or http://localhost:4041 for self-hosted)",
+      "sensitive": false
+    },
+    "token": {
+      "description": "API token for authentication (from rustunnel.com dashboard or your self-hosted admin token)",
+      "sensitive": true
+    }
+  }
+}

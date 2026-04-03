@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "rustunnel": {
+      "command": "rustunnel-mcp",
+      "args": [
+        "--server", "${user_config.server}",
+        "--api", "${user_config.api_url}"
+      ],
+      "env": {
+        "RUSTUNNEL_TOKEN": "${user_config.token}"
+      }
+    }
+  }
+}
