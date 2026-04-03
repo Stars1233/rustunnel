@@ -56,6 +56,20 @@ When you enable the plugin you will be asked for three values:
 These are persisted by Claude Code — you won't be asked again until you
 reconfigure or reinstall.
 
+### Reconfiguring
+
+To change your configuration after installation:
+
+```
+/plugin configure rustunnel
+```
+
+Run `/reload-plugins` after reconfiguring for changes to take effect.
+
+**Note:** The MCP server will not start until all three values are set. If you
+see a "Missing required user configuration value" error, run
+`/plugin configure rustunnel` to provide the missing values.
+
 ---
 
 ## Prerequisites

@@ -14,14 +14,20 @@
   "mcpServers": "./.mcp.json",
   "userConfig": {
     "server": {
+      "type": "string",
+      "title": "Server Address",
       "description": "Tunnel server address (e.g. eu.edge.rustunnel.com:4040 for hosted, or localhost:4040 for self-hosted)",
       "sensitive": false
     },
     "api_url": {
+      "type": "string",
+      "title": "Dashboard API URL",
       "description": "Dashboard API URL (e.g. https://eu.edge.rustunnel.com:8443 for hosted, or http://localhost:4041 for self-hosted)",
       "sensitive": false
     },
     "token": {
+      "type": "string",
+      "title": "API Token",
       "description": "API token for authentication (from rustunnel.com dashboard or your self-hosted admin token)",
       "sensitive": true
     }

@@ -26,6 +26,28 @@ brew install rustunnel
 # https://github.com/joaoh82/rustunnel/releases/latest
 ```
 
+## Configuration
+
+After installing, configure the plugin with your server details:
+
+```
+/plugin configure rustunnel
+```
+
+You will be prompted for three values:
+
+| Setting | Hosted example | Self-hosted example |
+|---------|---------------|---------------------|
+| Server address | `eu.edge.rustunnel.com:4040` | `localhost:4040` |
+| Dashboard API URL | `https://eu.edge.rustunnel.com:8443` | `http://localhost:4041` |
+| API token | `rt_live_abc123...` | your admin token |
+
+These values are stored securely by Claude Code and persist across sessions.
+
+**To reconfigure later**, run `/plugin configure rustunnel` again. Run `/reload-plugins` after reconfiguring for changes to take effect.
+
+**Important:** The MCP server will not start until all three values are configured. If you see a "Missing required user configuration value" error, run `/plugin configure rustunnel`.
+
 ## Usage
 
 Once installed, just ask Claude:

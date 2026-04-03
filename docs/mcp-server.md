@@ -88,7 +88,25 @@ The fastest way to get started. You need an auth token — see
 }
 ```
 
-**Claude Code** — add to your project's `.mcp.json`:
+**Claude Code (plugin — recommended)** — install the plugin for zero-config setup:
+
+```
+/plugin install rustunnel
+```
+
+Then configure your server details:
+
+```
+/plugin configure rustunnel
+```
+
+You'll be prompted for your server address, API URL, and token. These are
+stored securely and persist across sessions. To reconfigure later, run
+`/plugin configure rustunnel` again, then `/reload-plugins`.
+
+See the [Claude Code Plugin guide](claude-plugin.md) for full details.
+
+**Claude Code (manual `.mcp.json`)** — add to your project's `.mcp.json`:
 
 ```json
 {
