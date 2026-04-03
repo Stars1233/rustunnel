@@ -958,6 +958,7 @@ without any manual intervention.
 | `create_tunnel` | Spawn a tunnel and return the public URL |
 | `list_tunnels` | List all active tunnels |
 | `close_tunnel` | Force-close a tunnel by ID |
+| `list_regions` | List available server regions |
 | `get_connection_info` | Return the CLI command for cloud/sandbox agents |
 | `get_tunnel_history` | Retrieve past tunnel activity |
 
@@ -979,6 +980,23 @@ sudo install -m755 target/release/rustunnel-mcp /usr/local/bin/rustunnel-mcp
 
 Full setup guide, configuration options, and workflow examples are in
 [**docs/mcp-server.md**](docs/mcp-server.md).
+
+### Claude Code plugin
+
+The easiest way to use rustunnel with [Claude Code](https://claude.com/claude-code).
+Install the plugin and it handles all MCP configuration automatically — just enter
+your token once and start asking Claude to expose ports.
+
+```
+/plugin install rustunnel
+```
+
+The plugin prompts for your server address and API token at enable time, stores
+them securely, and starts the MCP server in the background. No `.mcp.json` editing
+or manual setup needed.
+
+**Plugin directory:** [`plugins/claude-code/`](plugins/claude-code/)
+**Documentation:** [docs/claude-plugin.md](docs/claude-plugin.md)
 
 ### OpenClaw skill
 
