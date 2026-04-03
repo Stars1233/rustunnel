@@ -25,11 +25,23 @@ will create a tunnel and return the public URL — no manual setup needed.
 /plugin install rustunnel
 ```
 
-### Local development / from source
+### Manual install from source
+
+Clone the repository and point Claude Code at the plugin directory:
 
 ```bash
-claude --plugin-dir plugins/claude-code/
+git clone https://github.com/joaoh82/rustunnel.git
+claude --plugin-dir rustunnel/plugins/claude-code/
 ```
+
+To load it permanently, add it to your Claude Code settings:
+
+```bash
+claude plugin install --path rustunnel/plugins/claude-code/
+```
+
+During development, use `/reload-plugins` inside Claude Code to pick up
+file changes without restarting.
 
 ### Setup prompts
 
