@@ -1,10 +1,11 @@
-//! Tool definitions, input schemas, and execution logic for all Phase-1 tools.
+//! Tool definitions, input schemas, and execution logic for all MCP tools.
 //!
 //! Tools implemented here:
-//!   - `create_tunnel`    — spawns `rustunnel` CLI and polls API for the URL
-//!   - `list_tunnels`     — GET /api/tunnels wrapper
-//!   - `close_tunnel`     — DELETE /api/tunnels/:id + kills spawned process
+//!   - `create_tunnel`       — spawns `rustunnel` CLI and polls API for the URL
+//!   - `list_tunnels`        — GET /api/tunnels wrapper
+//!   - `close_tunnel`        — DELETE /api/tunnels/:id + kills spawned process
 //!   - `get_connection_info` — returns CLI command string (no API call)
+//!   - `list_regions`        — GET /api/regions wrapper
 //!   - `get_tunnel_history`  — GET /api/history wrapper
 
 use std::collections::HashSet;

@@ -20,6 +20,8 @@ pub struct TunnelSummary {
     pub connected_since: String,
     pub request_count: u64,
     pub client_addr: String,
+    /// Region that hosts this tunnel (e.g. "eu", "us").
+    pub region_id: String,
 }
 
 impl ApiClient {

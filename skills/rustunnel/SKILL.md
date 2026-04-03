@@ -135,6 +135,7 @@ Expose a local port and get a public URL.
 | `local_port` | integer | yes | Local port to expose |
 | `protocol` | "http" \| "tcp" | yes | Tunnel type |
 | `subdomain` | string | no | Custom subdomain (HTTP only) |
+| `region` | string | no | Region ID (e.g. `"eu"`, `"us"`, `"ap"`). Omit to auto-select. Use `list_regions` to see options. |
 
 **Returns:**
 ```json
@@ -181,15 +182,23 @@ Retrieve history of past tunnels.
 | `protocol` | "http" \| "tcp" | no | Filter by protocol |
 | `limit` | integer | no | Max entries (default: 25) |
 
----
+### list_regions
 
-## CLI Fallback (Cloud Sandboxes Only)
+List available tunnel server regions. No authentication required.
 
-Use `get_connection_info` when MCP can't spawn subprocesses (cloud sandboxes, containers).
+**Parameters:** None
+
+**Returns:** JSON array of region objects:
+```json
+[
+  { "id": "eu", "name": "Europe", "location": "Helsinki, FI", "host": "eu.edge.rustunnel.com", "control_port": 4040, "active": true }
+]
+```
 
 ### get_connection_info
 
-Returns the CLI command string without spawning anything.
+Returns the CLI command string without spawning anything. Use when MCP can't
+spawn subprocesses (cloud sandboxes, containers) or you prefer running the CLI yourself.
 
 **Parameters:**
 | Param | Type | Required | Description |
@@ -197,6 +206,7 @@ Returns the CLI command string without spawning anything.
 | `token` | string | yes | API token |
 | `local_port` | integer | yes | Local port to expose |
 | `protocol` | "http" \| "tcp" | yes | Tunnel type |
+| `region` | string | no | Region ID (e.g. `"eu"`). Omit to auto-select. |
 
 **Returns:**
 ```json
@@ -207,11 +217,9 @@ Returns the CLI command string without spawning anything.
 }
 ```
 
-**Workflow for cloud sandboxes:**
-1. Call `get_connection_info()` to get CLI command
-2. Output command for user to run locally
-3. User runs command in their terminal
-4. Call `list_tunnels()` to verify tunnel is active
+---
+
+## Common Workflows
 
 ---
 

@@ -191,6 +191,7 @@ Open a tunnel to a locally running service and get a public URL.
 | `local_port` | integer | yes | Local port the service is listening on |
 | `protocol` | `"http"` \| `"tcp"` | yes | Tunnel type |
 | `subdomain` | string | no | Custom subdomain for HTTP tunnels |
+| `region` | string | no | Region ID (e.g. `"eu"`, `"us"`, `"ap"`). Omit to auto-select by latency. Use `list_regions` to see options. |
 
 **Returns:**
 ```json
@@ -244,6 +245,7 @@ you want to run the CLI yourself.
 | `token` | string | yes | API token |
 | `local_port` | integer | yes | Local port to expose |
 | `protocol` | `"http"` \| `"tcp"` | yes | Tunnel type |
+| `region` | string | no | Region ID (e.g. `"eu"`, `"us"`). Omit to auto-select. |
 
 **Returns:**
 ```json
@@ -252,6 +254,25 @@ you want to run the CLI yourself.
   "server":       "edge.rustunnel.com:4040",
   "install_url":  "https://github.com/joaoh82/rustunnel/releases/latest"
 }
+```
+
+---
+
+### `list_regions`
+
+List available tunnel server regions with their IDs, names, and locations.
+No authentication required.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | — | — | — |
+
+**Returns:** JSON array of region objects:
+```json
+[
+  { "id": "eu", "name": "Europe", "location": "Helsinki, FI", "host": "eu.edge.rustunnel.com", "control_port": 4040, "active": true },
+  { "id": "us", "name": "US West", "location": "Oregon, US", "host": "us.edge.rustunnel.com", "control_port": 4040, "active": true }
+]
 ```
 
 ---
