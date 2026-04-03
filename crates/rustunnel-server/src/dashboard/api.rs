@@ -82,6 +82,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/admin/plans", get(admin_list_plans))
         .route("/api/admin/usage/platform", get(admin_platform_usage))
+        .route(
+            "/api/admin/metrics/users-over-time",
+            get(admin_users_over_time),
+        )
         .route("/api/admin/users/:id/tunnels", get(admin_list_user_tunnels))
         .route("/api/admin/users/:id/tokens", get(admin_list_user_tokens))
         .layer(cors)
@@ -758,6 +762,45 @@ async fn admin_platform_usage(
             usage.active_tunnels_global = live_tunnels;
             Json(usage).into_response()
         }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrBody {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ── admin metrics routes ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct UsersOverTimeQuery {
+    /// Number of trailing days to include (1–365, default 30).
+    #[serde(default = "default_uot_days")]
+    days: i64,
+}
+
+fn default_uot_days() -> i64 {
+    30
+}
+
+/// `GET /api/admin/metrics/users-over-time?days=30`
+///
+/// Returns `days` daily data points (oldest → newest) with user-registration
+/// counts, filling zeroes for days with no registrations.
+/// Requires the admin token.
+async fn admin_users_over_time(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    axum::extract::Query(q): axum::extract::Query<UsersOverTimeQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin(&headers, &state).await {
+        return e.into_response();
+    }
+    let days = q.days.clamp(1, 365);
+    match db::get_users_over_time(&state.db.pg, days).await {
+        Ok(entries) => Json(entries).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrBody {
