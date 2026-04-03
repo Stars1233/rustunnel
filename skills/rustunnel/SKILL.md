@@ -1,7 +1,7 @@
 ---
 name: rustunnel
 description: "Expose local services via secure tunnels using rustunnel MCP server. Create public URLs for local HTTP/TCP services for testing, webhooks, and deployment."
-version: 1.3.0
+version: 1.3.1
 author: OpenClaw
 tags: [tunnel, ngrok, expose, devops, deployment, testing, webhooks]
 ---
