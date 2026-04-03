@@ -385,7 +385,33 @@ Or use the Makefile target (runs build + install + systemd setup):
 sudo make deploy
 ```
 
-### 5 — Create the server config file
+### 5 — Set up PostgreSQL
+
+rustunnel requires PostgreSQL for shared state (tokens, tunnel history, audit log).
+
+```bash
+apt install -y postgresql postgresql-contrib
+
+# Start and enable the service
+systemctl enable --now postgresql
+```
+
+Create a dedicated database and user:
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER rustunnel WITH PASSWORD 'CHANGE_ME';
+CREATE DATABASE rustunnel OWNER rustunnel;
+GRANT ALL PRIVILEGES ON DATABASE rustunnel TO rustunnel;
+SQL
+```
+
+> **Tip:** For managed PostgreSQL (e.g. AWS RDS, DigitalOcean Managed Database, Supabase) skip the
+> `apt install` step above and just note the connection URL for the config in the next step.
+
+Schema migrations run automatically when the server starts — no manual SQL needed.
+
+### 6 — Create the server config file
 
 Create `/etc/rustunnel/server.toml` with the content below.
 Replace `your-admin-token-here` with a strong random secret (e.g. `openssl rand -hex 32`).
@@ -407,6 +433,10 @@ control_port = 4040
 # Dashboard UI and REST API port.
 dashboard_port = 8443
 
+# Allowed CORS origin for the dashboard UI.
+# Set to the URL where you serve the dashboard-ui (e.g. http://localhost:3000 for local dev).
+dashboard_origin = "http://localhost:3000"
+
 # ── TLS ─────────────────────────────────────────────────────────────────────
 [tls]
 # Paths written by Certbot (see step 6).
@@ -427,8 +457,14 @@ require_auth = true
 
 # ── Database ─────────────────────────────────────────────────────────────────
 [database]
-# SQLite file. The directory must be writable by the rustunnel user.
-path = "/var/lib/rustunnel/rustunnel.db"
+# PostgreSQL connection URL — the database and user must exist before starting
+# the server (see the PostgreSQL setup step above).  Schema migrations run
+# automatically on first start.
+url = "postgresql://rustunnel:CHANGE_ME@localhost:5432/rustunnel"
+
+# Per-region SQLite file for captured HTTP request bodies.
+# The directory must be writable by the rustunnel user.
+captured_path = "/var/lib/rustunnel/captured.db"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 [logging]
@@ -469,7 +505,7 @@ chown root:rustunnel /etc/rustunnel/server.toml
 chmod 640 /etc/rustunnel/server.toml
 ```
 
-### 6 — TLS certificates (Let's Encrypt + Cloudflare)
+### 7 — TLS certificates (Let's Encrypt + Cloudflare)
 
 Create the Cloudflare credentials file:
 
@@ -500,7 +536,18 @@ Certbot writes the certificate to:
 /etc/letsencrypt/live/edge.rustunnel.com/privkey.pem
 ```
 
-These paths are already set in the config above. Certbot sets up automatic renewal via a systemd timer — no further action needed.
+These paths are already set in the config above. Certbot sets up automatic renewal via a systemd timer.
+
+rustunnel reads TLS certificates from disk at startup, so it must be restarted after each renewal.
+Add a Certbot deploy hook to do this automatically:
+
+```bash
+cat > /etc/letsencrypt/renewal-hooks/deploy/restart-rustunnel.sh <<'EOF'
+#!/bin/sh
+systemctl restart rustunnel.service
+EOF
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-rustunnel.sh
+```
 
 Allow the `rustunnel` service user to read the certificates:
 
@@ -513,7 +560,7 @@ chgrp rustunnel /etc/letsencrypt/archive/edge.rustunnel.com/*.pem
 chmod 640 /etc/letsencrypt/archive/edge.rustunnel.com/*.pem
 ```
 
-### 7 — Set up systemd service
+### 8 — Set up systemd service
 
 ```bash
 # Copy the unit file from the repository
@@ -527,7 +574,7 @@ systemctl status rustunnel.service
 journalctl -u rustunnel.service -f
 ```
 
-### 8 — Open firewall ports
+### 9 — Open firewall ports
 
 ```bash
 ufw allow 80/tcp   comment "rustunnel HTTP edge"
@@ -540,7 +587,7 @@ ufw allow 9090/tcp comment "rustunnel Prometheus metrics"
 ufw allow 20000:20099/tcp comment "rustunnel TCP tunnels"
 ```
 
-### 9 — Verify the server is running
+### 10 — Verify the server is running
 
 ```bash
 # Health check — use dashboard_port from server.toml (default 8443 in production)
@@ -811,7 +858,9 @@ curl -s -X POST https://your-server:8443/api/tokens \
 | `tls.cloudflare_zone_id` | string | `""` | Cloudflare Zone ID (prefer env var `CLOUDFLARE_ZONE_ID`) |
 | `auth.admin_token` | string | — | Master auth token |
 | `auth.require_auth` | bool | — | Reject unauthenticated clients |
-| `database.path` | string | — | SQLite file path (`:memory:` for tests) |
+| `database.url` | string | — | PostgreSQL connection URL (required) |
+| `database.captured_path` | string | `/var/lib/rustunnel/captured.db` | Per-region SQLite file for captured HTTP request bodies |
+| `server.dashboard_origin` | string | `""` | Allowed CORS origin for the dashboard UI (e.g. `http://localhost:3000`) |
 | `logging.level` | string | — | `trace` / `debug` / `info` / `warn` / `error` |
 | `logging.format` | string | — | `json` or `pretty` |
 | `logging.audit_log_path` | string | `null` | Path for audit log (JSON-lines); omit to disable |

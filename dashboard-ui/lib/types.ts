@@ -14,7 +14,7 @@ export interface Tunnel {
   public_url: string;
   connected_since: string;
   request_count: number;
-  client_addr: string | null;
+  client_addr: string;
   /** Region ID of the server hosting this tunnel (e.g. "eu", "us"). */
   region_id: string;
 }
