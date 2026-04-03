@@ -447,6 +447,42 @@ pub async fn list_admin_plans(pool: &PgPool) -> Result<Vec<AdminPlan>> {
     Ok(rows)
 }
 
+// ── admin metrics helpers ─────────────────────────────────────────────────────
+
+/// One data point for the "users created over time" time-series.
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct UserOverTimeEntry {
+    /// Date in `YYYY-MM-DD` format.
+    pub date: String,
+    /// Number of users created on that date.
+    pub count: i64,
+}
+
+/// Return daily user-registration counts for the last `days` days (inclusive today).
+///
+/// Uses `generate_series` to fill in days with zero registrations, so the
+/// caller always receives exactly `days` ascending data points.
+pub async fn get_users_over_time(pool: &PgPool, days: i64) -> Result<Vec<UserOverTimeEntry>> {
+    let rows: Vec<UserOverTimeEntry> = sqlx::query_as(
+        "SELECT
+             series.day::text AS date,
+             COALESCE(COUNT(u.id), 0)::bigint AS count
+         FROM generate_series(
+             CURRENT_DATE - ($1 - 1) * INTERVAL '1 day',
+             CURRENT_DATE,
+             INTERVAL '1 day'
+         ) AS series(day)
+         LEFT JOIN users u
+             ON DATE_TRUNC('day', u.created_at AT TIME ZONE 'UTC') = series.day
+         GROUP BY series.day
+         ORDER BY series.day ASC",
+    )
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 // ── admin platform usage helpers ──────────────────────────────────────────────
 
 /// Platform-wide aggregate metrics drawn from the shared tunnel_log and users tables.
