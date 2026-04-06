@@ -342,6 +342,7 @@ pub struct AdminUser {
     pub display_name: Option<String>,
     pub email_verified: bool,
     pub status: String,
+    pub auth_method: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Number of API tokens belonging to this user.
     pub token_count: i64,
@@ -359,7 +360,7 @@ pub async fn list_admin_users(
     search: Option<&str>,
 ) -> Result<Vec<AdminUser>> {
     let rows: Vec<AdminUser> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
+        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.auth_method, u.created_at,
                 COUNT(t.id)::bigint AS token_count,
                 (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
                  WHERE s.user_id = u.id AND s.status != 'canceled'
@@ -397,7 +398,7 @@ pub async fn count_admin_users(pool: &PgPool, search: Option<&str>) -> Result<i6
 /// Single user detail with their token list.
 pub async fn get_admin_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<AdminUser>> {
     let row: Option<AdminUser> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.created_at,
+        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.auth_method, u.created_at,
                 COUNT(t.id)::bigint AS token_count,
                 (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
                  WHERE s.user_id = u.id AND s.status != 'canceled'
