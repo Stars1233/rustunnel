@@ -92,6 +92,15 @@ This document tracks the features that have already shipped and ideas planned fo
 - [x] 24-hour region list cache at `~/.rustunnel/regions.json`
 - [x] Global edge fleet: EU (Helsinki), US (Hillsboro, OR), AP (Singapore)
 
+### Observability (continued)
+- [x] Sentry integration for error tracking and distributed tracing
+- [x] Accurate bytes-proxied tracking per tunnel session
+- [x] Per-request body size capture via RAII `CaptureGuard`
+- [x] `GET /api/admin/metrics/users-over-time` — user growth metrics for admin dashboard
+
+### Authentication (continued)
+- [x] Google OAuth sign-in for the managed service
+
 ### AI agent integration (Phase 1)
 - [x] `rustunnel-mcp` binary — MCP server with stdio transport
 - [x] `create_tunnel` tool — spawns `rustunnel` CLI subprocess and polls API for the public URL
@@ -100,6 +109,9 @@ This document tracks the features that have already shipped and ideas planned fo
 - [x] `get_connection_info` tool — returns CLI command for cloud/sandbox agents
 - [x] `get_tunnel_history` tool — REST wrapper for `GET /api/history`
 - [x] `GET /api/openapi.json` — machine-readable API spec for agent discovery
+- [x] Claude Code plugin — `/plugin install rustunnel` with secure token storage, skill definition, and zero-config MCP setup
+- [x] `list_regions` MCP tool — calls `GET /api/regions`, returns region list to the agent
+- [x] `region` parameter on `create_tunnel` and `get_connection_info` MCP tools
 
 ---
 
@@ -112,6 +124,7 @@ Items below are not committed to any release timeline. They represent directions
 - [ ] `rustunnel status` command to inspect the active connection and registered tunnels
 - [ ] Extended Prometheus metrics (bytes proxied, request latency histograms, error rates)
 - [ ] `rustunnel setup --update` flag to edit an existing config file non-destructively
+- [ ] Token-scoped tunnel isolation — `list_tunnels` and `close_tunnel` restricted to tunnels owned by the calling token
 
 ### AI agent integration (Phase 2 — x402 payments)
 - [ ] x402 middleware on `POST /api/tokens` — gate token creation behind USDC micropayment
@@ -172,3 +185,8 @@ Items below are not committed to any release timeline. They represent directions
 | 0.4.2 | Stripe billing — PAYG plan with metered bandwidth ($0.10/GB), spend cap, Stripe Customer Portal integration |
 | 0.4.6 | PAYG minimum fee — $3/month floor covering first 30 GB; overage charged via invoice webhook; TLS/HTTPS termination listed on all plans; custom subdomains gated by plan |
 | 0.4.10 | Zero-downtime data WebSocket reconnect — when the data plane drops (NAT timeout, network blip), the client reconnects only the data WebSocket without re-authenticating or re-registering tunnels; same subdomain/port preserved. Server-side change is backwards compatible with older clients. |
+| 0.4.12 | Sentry integration for error tracking and distributed tracing |
+| 0.4.13 | Fix bytes-proxied tracking — tunnels now report actual transfer instead of 0 |
+| 0.4.14 | Accurate per-request body size capture via RAII `CaptureGuard` |
+| 0.4.16 | Admin metrics — `GET /api/admin/metrics/users-over-time` for user growth charts |
+| 0.4.18 | Claude Code plugin (`/plugin install rustunnel`), Google OAuth sign-in, plugin configuration docs |
