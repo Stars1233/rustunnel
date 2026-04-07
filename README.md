@@ -94,9 +94,10 @@ Once you have a token, run the setup wizard:
 
 ```bash
 rustunnel setup
-# Tunnel server address [edge.rustunnel.com:4040]: (press Enter)
+# Region [auto / eu / us / ap / self-hosted] (default: auto): (press Enter)
+#   Selecting nearest region… eu 12ms · us 143ms · ap 311ms · → eu (Helsinki, FI) 12ms
+#   Server set to: eu.edge.rustunnel.com:4040
 # Auth token: <paste your token>
-# Region [auto / eu / us / ap] (default: auto): (press Enter)
 ```
 
 Then expose a local service:
@@ -722,18 +723,22 @@ The easiest way to create your config file is the interactive setup wizard:
 rustunnel setup
 ```
 
-It prompts for your server address, auth token, and region preference, then writes `~/.rustunnel/config.yml` with a commented `tunnels:` example section.
+It prompts for your region and auth token, then writes `~/.rustunnel/config.yml` with the correct server address and a commented `tunnels:` example section.
 
 ```
 rustunnel setup — create ~/.rustunnel/config.yml
 
-Tunnel server address [edge.rustunnel.com:4040]:
+Region [auto / eu / us / ap / self-hosted] (default: auto):
+  Selecting nearest region… eu 12ms · us 143ms · ap 311ms · → eu (Helsinki, FI) 12ms
+  Server set to: eu.edge.rustunnel.com:4040
+
 Auth token (leave blank to skip): rt_live_abc123...
-Region [auto / eu / us / ap] (default: auto):
 
 Created: /Users/you/.rustunnel/config.yml
 Run `rustunnel start` to connect using this config.
 ```
+
+Pick a specific region (`eu`, `us`, `ap`) to connect directly, or `auto` (the default) to let the client probe all regions and pick the nearest. Choose `self-hosted` if you run your own server — the wizard will then prompt for your server address.
 
 After running setup, use `rustunnel start` to connect with all tunnels defined in the config, or use `rustunnel http <port>` / `rustunnel tcp <port>` for one-off tunnels.
 
