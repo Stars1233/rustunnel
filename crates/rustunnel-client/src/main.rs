@@ -263,27 +263,53 @@ async fn run_setup() -> error::Result<()> {
     term.write_line("rustunnel setup — create ~/.rustunnel/config.yml")?;
     term.write_line("")?;
 
-    // Server prompt
-    term.write_line("Tunnel server address [edge.rustunnel.com:4040]: ")?;
-    let server_input = term.read_line()?;
-    let server = if server_input.trim().is_empty() {
-        "edge.rustunnel.com:4040".to_string()
-    } else {
-        server_input.trim().to_string()
+    // 1. Region prompt (first — determines server)
+    term.write_line("Region [auto / eu / us / ap / self-hosted] (default: auto): ")?;
+    let region_input = term.read_line()?;
+    let region_choice = region_input.trim().to_lowercase();
+
+    let (server, region) = match region_choice.as_str() {
+        // Known managed region: resolve server automatically
+        "eu" | "us" | "ap" => {
+            let srv = regions::server_for_region(&region_choice)
+                .expect("built-in region lookup must succeed for eu/us/ap");
+            term.write_line(&format!("  Server set to: {srv}"))?;
+            (srv, Some(region_choice))
+        }
+
+        // Auto: probe all regions, pick nearest
+        "" | "auto" => {
+            let srv = regions::auto_select_nearest().await;
+            term.write_line(&format!("  Server set to: {srv}"))?;
+            (srv, Some("auto".to_string()))
+        }
+
+        // Self-hosted: user provides their own server
+        "self-hosted" => {
+            term.write_line("")?;
+            term.write_line("Tunnel server address: ")?;
+            let server_input = term.read_line()?;
+            let srv = server_input.trim().to_string();
+            if srv.is_empty() {
+                return Err(error::Error::Config(
+                    "server address is required for self-hosted mode".into(),
+                ));
+            }
+            (srv, None) // no region stored
+        }
+
+        other => {
+            return Err(error::Error::Config(format!(
+                "unknown region '{other}' — choose auto, eu, us, ap, or self-hosted"
+            )));
+        }
     };
 
-    // Auth token prompt
+    // 2. Auth token prompt
+    term.write_line("")?;
     term.write_line("Auth token (leave blank to skip): ")?;
     let token_input = term.read_line()?;
     let auth_token = token_input.trim().to_string();
-
-    // Region prompt
-    term.write_line("Region [auto / eu / us / ap] (default: auto): ")?;
-    let region_input = term.read_line()?;
-    let region = match region_input.trim() {
-        "" | "auto" => "auto".to_string(),
-        r => r.to_string(),
-    };
 
     // Build config file contents
     let auth_token_line = if auth_token.is_empty() {
@@ -292,13 +318,18 @@ async fn run_setup() -> error::Result<()> {
         format!("auth_token: {auth_token}")
     };
 
+    let region_line = match &region {
+        Some(r) => format!("region: {r}"),
+        None => "# region: not applicable (self-hosted)".to_string(),
+    };
+
     let contents = format!(
         r#"# rustunnel configuration
 # Documentation: https://github.com/joaoh82/rustunnel
 
 server: {server}
 {auth_token_line}
-region: {region}
+{region_line}
 
 # tunnels:
 #   web:
