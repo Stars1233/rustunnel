@@ -60,7 +60,7 @@ rustunnel --version
 
 # 2. Create a config file interactively
 rustunnel setup
-# → prompts for server address and auth token, writes ~/.rustunnel/config.yml
+# → prompts for region and auth token, writes ~/.rustunnel/config.yml
 
 # 3. Expose a local web server running on port 3000
 rustunnel http 3000
@@ -152,9 +152,17 @@ rustunnel setup
 
 | Prompt | Default | Description |
 |--------|---------|-------------|
-| Server address | `edge.rustunnel.com:4040` | The control-plane host:port to connect to |
+| Region | `auto` | `auto` (probe nearest), `eu`, `us`, `ap`, or `self-hosted` |
 | Auth token | _(blank)_ | Token issued by the server; leave empty to fill in later |
-| Region | `auto` | `auto` (probe nearest), `eu`, `us`, or `ap` |
+| Server address | _(auto-resolved)_ | Only prompted when `self-hosted` is selected |
+
+**Region behavior:**
+
+| Choice | Server resolution |
+|--------|-------------------|
+| `eu` / `us` / `ap` | Auto-set to `<region>.edge.rustunnel.com:4040` |
+| `auto` | Probes all regions, picks the nearest by latency |
+| `self-hosted` | Prompts for your server address |
 
 **Behaviour:**
 
@@ -163,26 +171,43 @@ rustunnel setup
 - Writes a commented `tunnels:` block with HTTP and TCP examples so you can see the structure right away.
 - Prints `Created:` or `Updated:` with the full path when done.
 
-**Example session:**
+**Example session (auto region):**
 
 ```
 rustunnel setup — create ~/.rustunnel/config.yml
 
-Tunnel server address [edge.rustunnel.com:4040]:
+Region [auto / eu / us / ap / self-hosted] (default: auto):
+  Selecting nearest region… eu 12ms · us 143ms · ap 311ms · → eu (Helsinki, FI) 12ms
+  Server set to: eu.edge.rustunnel.com:4040
+
 Auth token (leave blank to skip): rt_live_abc123xyz
-Region [auto / eu / us / ap] (default: auto):
 
 Created: /Users/alice/.rustunnel/config.yml
 Run `rustunnel start` to connect using this config.
 ```
 
-**Generated file:**
+**Example session (self-hosted):**
+
+```
+rustunnel setup — create ~/.rustunnel/config.yml
+
+Region [auto / eu / us / ap / self-hosted] (default: auto): self-hosted
+
+Tunnel server address: tunnel.internal.corp:4040
+
+Auth token (leave blank to skip): my-token
+
+Created: /Users/alice/.rustunnel/config.yml
+Run `rustunnel start` to connect using this config.
+```
+
+**Generated file (managed):**
 
 ```yaml
 # rustunnel configuration
 # Documentation: https://github.com/joaoh82/rustunnel
 
-server: edge.rustunnel.com:4040
+server: eu.edge.rustunnel.com:4040
 auth_token: rt_live_abc123xyz
 region: auto
 
@@ -197,6 +222,20 @@ region: auto
 #   database:
 #     proto: tcp
 #     local_port: 5432
+```
+
+**Generated file (self-hosted):**
+
+```yaml
+# rustunnel configuration
+# Documentation: https://github.com/joaoh82/rustunnel
+
+server: tunnel.internal.corp:4040
+auth_token: my-token
+# region: not applicable (self-hosted)
+
+# tunnels:
+#   ...
 ```
 
 After running `setup`, uncomment and fill in the `tunnels:` section then run `rustunnel start`, or use `rustunnel http <port>` / `rustunnel tcp <port>` directly.

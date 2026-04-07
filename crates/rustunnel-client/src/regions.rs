@@ -197,6 +197,54 @@ fn extract_host(server: &str) -> &str {
     server.split(':').next().unwrap_or(server)
 }
 
+/// Returns the server address (`host:port`) for a known managed region ID.
+///
+/// Looks up the built-in region list. Returns `None` for unknown IDs
+/// (caller should prompt or probe).
+pub fn server_for_region(region_id: &str) -> Option<String> {
+    builtin_regions()
+        .iter()
+        .find(|r| r.id == region_id)
+        .map(|r| format!("{}:{}", r.host, r.control_port))
+}
+
+/// Probe all regions and return the server address of the nearest one.
+///
+/// This is the same logic as `auto_select` but exposed for use by the setup
+/// wizard (which doesn't have a bootstrap host from config yet).
+pub async fn auto_select_nearest() -> String {
+    // Use built-in regions directly — during setup there's no config to read.
+    let regions = builtin_regions();
+
+    eprint!("  Selecting nearest region…");
+
+    let probes: Vec<_> = regions
+        .iter()
+        .map(|r| {
+            let host = r.host.clone();
+            let port = r.control_port;
+            async move { probe_latency(&host, port).await }
+        })
+        .collect();
+
+    let latencies = futures_util::future::join_all(probes).await;
+
+    for (r, d) in regions.iter().zip(latencies.iter()) {
+        eprint!(" {} {}ms ·", r.id, d.as_millis());
+    }
+
+    let (best, best_ms) = regions
+        .iter()
+        .zip(latencies.iter())
+        .min_by_key(|(_, d)| d.as_millis())
+        .map(|(r, d)| (r, d.as_millis()))
+        .expect("region list is never empty");
+
+    eprintln!(" → {} ({}) {}ms", best.id, best.location, best_ms);
+
+    format!("{}:{}", best.host, best.control_port)
+}
+
 /// Resolve the control-plane server address to connect to.
 ///
 /// - `config_server`: current value of `ClientConfig::server` (e.g. `"eu.edge.rustunnel.com:4040"`)
