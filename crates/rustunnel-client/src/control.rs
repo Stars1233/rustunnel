@@ -382,7 +382,7 @@ async fn main_loop(
     // Pending maps to handle the two orderings of NewConnection vs stream:
     //   pending_conns:   NewConnection arrived first  → wait for matching stream
     //   pending_streams: stream arrived first         → wait for matching NewConnection
-    let mut pending_conns: std::collections::HashMap<Uuid, String> =
+    let mut pending_conns: std::collections::HashMap<Uuid, (String, TunnelProtocol)> =
         std::collections::HashMap::new();
     let mut pending_streams: std::collections::HashMap<Uuid, YamuxStream> =
         std::collections::HashMap::new();
@@ -412,9 +412,13 @@ async fn main_loop(
             pair = stream_rx.recv() => {
                 match pair {
                     Some((conn_id, stream)) => {
-                        if let Some(local_addr) = pending_conns.remove(&conn_id) {
+                        if let Some((local_addr, protocol)) = pending_conns.remove(&conn_id) {
                             // NewConnection arrived earlier — proxy immediately.
-                            tokio::spawn(proxy::proxy_connection(stream, local_addr, conn_id));
+                            if protocol == TunnelProtocol::Udp {
+                                tokio::spawn(proxy::proxy_udp_connection(stream, local_addr, conn_id));
+                            } else {
+                                tokio::spawn(proxy::proxy_connection(stream, local_addr, conn_id));
+                            }
                         } else {
                             // NewConnection hasn't arrived yet — stash the stream.
                             debug!(%conn_id, "stream arrived before NewConnection — buffering");
@@ -470,7 +474,7 @@ async fn main_loop(
 
                         match frame {
                             ControlFrame::NewConnection { conn_id, client_addr, protocol } => {
-                                debug!(%conn_id, %client_addr, "new connection from server");
+                                debug!(%conn_id, %client_addr, ?protocol, "new connection from server");
 
                                 match find_local_addr(registered, &protocol) {
                                     None => {
@@ -478,15 +482,20 @@ async fn main_loop(
                                             "no local address configured for protocol");
                                     }
                                     Some(local_addr) => {
+                                        let is_udp = protocol == TunnelProtocol::Udp;
                                         if let Some(stream) = pending_streams.remove(&conn_id) {
-                                            // Stream already arrived — proxy immediately.
-                                            tokio::spawn(proxy::proxy_connection(
-                                                stream, local_addr, conn_id,
-                                            ));
+                                            if is_udp {
+                                                tokio::spawn(proxy::proxy_udp_connection(
+                                                    stream, local_addr, conn_id,
+                                                ));
+                                            } else {
+                                                tokio::spawn(proxy::proxy_connection(
+                                                    stream, local_addr, conn_id,
+                                                ));
+                                            }
                                         } else {
-                                            // Stream hasn't arrived yet — stash the address.
                                             debug!(%conn_id, "NewConnection arrived before stream — buffering");
-                                            pending_conns.insert(conn_id, local_addr);
+                                            pending_conns.insert(conn_id, (local_addr, protocol));
                                         }
                                     }
                                 }
@@ -588,6 +597,7 @@ fn proto_to_enum(proto: &str) -> Result<TunnelProtocol> {
         "http" => Ok(TunnelProtocol::Http),
         "https" => Ok(TunnelProtocol::Https),
         "tcp" => Ok(TunnelProtocol::Tcp),
+        "udp" => Ok(TunnelProtocol::Udp),
         other => Err(Error::Config(format!("unknown protocol: {other}"))),
     }
 }
@@ -605,6 +615,7 @@ fn find_local_addr(
                 def.proto == "http" || def.proto == "https"
             }
             TunnelProtocol::Tcp => def.proto == "tcp",
+            TunnelProtocol::Udp => def.proto == "udp",
         };
         if matches {
             return Some(format!("{}:{}", def.local_host, def.local_port));

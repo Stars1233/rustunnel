@@ -29,7 +29,11 @@ impl IpRateLimiter {
 
     /// Returns `true` when the request is within budget (allowed).
     /// Returns `false` when the IP is rate-limited.
+    /// A `max_per_window` of 0 disables the limiter (all requests allowed).
     pub fn check(&self, ip: IpAddr) -> bool {
+        if self.max_per_window == 0 {
+            return true;
+        }
         let now = Instant::now();
         let cutoff = now - self.window;
 

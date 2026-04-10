@@ -44,6 +44,9 @@ enum Commands {
     /// Start a TCP tunnel for a local port
     Tcp(TunnelArgs),
 
+    /// Start a UDP tunnel for a local port
+    Udp(TunnelArgs),
+
     /// Start one or more tunnels defined in a config file
     Start(StartArgs),
 
@@ -142,6 +145,7 @@ async fn run(cli: Cli) -> error::Result<()> {
     match cli.command {
         Commands::Http(args) => run_tunnel("http", args).await,
         Commands::Tcp(args) => run_tunnel("tcp", args).await,
+        Commands::Udp(args) => run_tunnel("udp", args).await,
         Commands::Start(args) => run_start(args).await,
         Commands::Token(cmd) => run_token(cmd).await,
         Commands::Setup => run_setup().await,

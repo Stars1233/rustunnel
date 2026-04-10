@@ -628,6 +628,51 @@ where
                         }
                     }
                 }
+                TunnelProtocol::Udp => match core.register_udp_tunnel(&session_id) {
+                    Ok((tunnel_id, port)) => {
+                        let public_url = format!("udp://{}:{port}", config.server.domain);
+                        let port_str = port.to_string();
+                        let _ = audit_tx.try_send(AuditEvent::TunnelRegistered {
+                            session_id: session_id.to_string(),
+                            tunnel_id: tunnel_id.to_string(),
+                            protocol: "udp".into(),
+                            label: port_str.clone(),
+                        });
+                        let _ = db::log_tunnel_registered(
+                            &db.pg,
+                            db::TunnelRegistration {
+                                tunnel_id: &tunnel_id.to_string(),
+                                protocol: "udp",
+                                label: &port_str,
+                                session_id: &session_id.to_string(),
+                                token_id: db_token_id.as_deref(),
+                                region_id: &config.region.id,
+                                user_id: token_user_id,
+                            },
+                        )
+                        .await;
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelRegistered {
+                                request_id,
+                                tunnel_id,
+                                public_url,
+                                assigned_port: Some(port),
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelError {
+                                request_id,
+                                message: e.to_string(),
+                            },
+                        )
+                        .await?;
+                    }
+                },
                 TunnelProtocol::Tcp => match core.register_tcp_tunnel(&session_id) {
                     Ok((tunnel_id, port)) => {
                         let public_url = format!("tcp://{}:{port}", config.server.domain);

@@ -27,7 +27,7 @@ use rustunnel_server::control::server::run_control_plane;
 use rustunnel_server::core::{ControlMessage, TunnelCore};
 use rustunnel_server::dashboard::run_dashboard;
 use rustunnel_server::db;
-use rustunnel_server::edge::{run_http_edge, run_tcp_edge, HttpEdgeConfig};
+use rustunnel_server::edge::{run_http_edge, run_tcp_edge, run_udp_edge, HttpEdgeConfig};
 use rustunnel_server::error::Result;
 use rustunnel_server::tls::CertManager;
 
@@ -123,6 +123,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
 
     let core = Arc::new(TunnelCore::new(
         config.limits.tcp_port_range,
+        config.limits.udp_port_range,
         config.limits.max_tunnels_per_session,
         config.limits.max_connections_per_tunnel,
         config.limits.ip_rate_limit_rps,
@@ -216,6 +217,15 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         })
     };
 
+    // ── task c2: UDP edge proxy ──────────────────────────────────────────────
+
+    let h_udp = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            run_udp_edge(core).await;
+        })
+    };
+
     // ── task d: dashboard API server ──────────────────────────────────────────
 
     let h_dashboard = {
@@ -277,6 +287,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         h_control.abort_handle(),
         h_http.abort_handle(),
         h_tcp.abort_handle(),
+        h_udp.abort_handle(),
         h_dashboard.abort_handle(),
         h_metrics.abort_handle(),
     ];
@@ -286,6 +297,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         let _ = h_control.await;
         let _ = h_http.await;
         let _ = h_tcp.await;
+        let _ = h_udp.await;
         let _ = h_dashboard.await;
         let _ = h_metrics.await;
     })

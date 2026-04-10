@@ -53,8 +53,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "protocol": {
                         "type": "string",
-                        "enum": ["http", "tcp"],
-                        "description": "Use 'http' for web/API services, 'tcp' for databases or SSH"
+                        "enum": ["http", "tcp", "udp"],
+                        "description": "Use 'http' for web/API services, 'tcp' for databases or SSH, 'udp' for game servers or DNS"
                     },
                     "subdomain": {
                         "type": "string",
@@ -124,7 +124,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "protocol": {
                         "type": "string",
-                        "enum": ["http", "tcp"],
+                        "enum": ["http", "tcp", "udp"],
                         "description": "Tunnel protocol"
                     },
                     "region": {
@@ -158,7 +158,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "protocol": {
                         "type": "string",
-                        "enum": ["http", "tcp"],
+                        "enum": ["http", "tcp", "udp"],
                         "description": "Optional: filter by protocol. Omit for all."
                     },
                     "limit": {

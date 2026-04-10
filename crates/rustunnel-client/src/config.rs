@@ -38,7 +38,7 @@ pub struct ClientConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TunnelDef {
-    /// Protocol: `"http"` or `"tcp"`.
+    /// Protocol: `"http"`, `"tcp"`, or `"udp"`.
     pub proto: String,
     /// Local port to forward to.
     pub local_port: u16,

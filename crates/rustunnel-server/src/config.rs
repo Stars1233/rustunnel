@@ -169,6 +169,14 @@ pub struct LimitsSection {
     pub request_body_max_bytes: usize,
     /// Inclusive [low, high] port range reserved for TCP tunnels
     pub tcp_port_range: [u16; 2],
+    /// Inclusive [low, high] port range reserved for UDP tunnels.
+    /// Set to [0, 0] to disable UDP tunnels.
+    #[serde(default = "default_udp_port_range")]
+    pub udp_port_range: [u16; 2],
+}
+
+fn default_udp_port_range() -> [u16; 2] {
+    [0, 0]
 }
 
 fn default_ip_rate_limit_rps() -> u32 {
@@ -236,6 +244,7 @@ impl Default for ServerConfig {
                 ip_rate_limit_rps: 1000,
                 request_body_max_bytes: 10 * 1024 * 1024,
                 tcp_port_range: [20000, 20099],
+                udp_port_range: [0, 0],
             },
             region: RegionSection {
                 id: "test".to_string(),

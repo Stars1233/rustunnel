@@ -255,7 +255,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn make_core() -> Arc<TunnelCore> {
-        Arc::new(TunnelCore::new([25000, 25010], 5, 100, 1000))
+        Arc::new(TunnelCore::new([25000, 25010], [0, 0], 5, 100, 1000))
     }
 
     fn add_session(core: &Arc<TunnelCore>) -> (Uuid, mpsc::Receiver<ControlMessage>) {

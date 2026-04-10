@@ -9,6 +9,7 @@ pub enum TunnelProtocol {
     Http,
     Https,
     Tcp,
+    Udp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

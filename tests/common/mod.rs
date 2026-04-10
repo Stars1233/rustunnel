@@ -255,6 +255,7 @@ impl TestServer {
                 ip_rate_limit_rps: 100_000,
                 request_body_max_bytes: 1024 * 1024,
                 tcp_port_range: [tcp_low, tcp_high],
+                udp_port_range: [0, 0],
             },
             region: RegionSection {
                 id: "test".to_string(),
@@ -276,6 +277,7 @@ impl TestServer {
         // Shared tunnel core.
         let core = Arc::new(TunnelCore::new(
             config.limits.tcp_port_range,
+            config.limits.udp_port_range,
             config.limits.max_tunnels_per_session,
             config.limits.max_connections_per_tunnel,
             config.limits.ip_rate_limit_rps,
