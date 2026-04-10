@@ -34,6 +34,8 @@ pub struct TunnelCore {
     pub tcp_routes: DashMap<u16, TunnelInfo>,
     /// port → TunnelInfo  (UDP tunnels)
     pub udp_routes: DashMap<u16, TunnelInfo>,
+    /// name → P2pPublisher  (P2P tunnels registered by publishers)
+    pub p2p_tunnels: DashMap<String, P2pPublisher>,
     /// session_id → SessionInfo
     pub sessions: DashMap<Uuid, SessionInfo>,
     /// Pool of TCP ports not yet allocated; populated from the configured range.
@@ -59,12 +61,21 @@ pub struct TunnelCore {
     pub ip_limiter: Arc<IpRateLimiter>,
 }
 
+/// A registered P2P publisher — subscribers connect to this by name.
+#[derive(Debug, Clone)]
+pub struct P2pPublisher {
+    pub tunnel_info: TunnelInfo,
+    pub secret_hash: String,
+    pub name: String,
+}
+
 /// Identifies where a tunnel lives in the routing tables.
 #[derive(Debug, Clone)]
 enum TunnelKey {
     Http(String),
     Tcp(u16),
     Udp(u16),
+    P2p(String),
 }
 
 impl TunnelCore {
@@ -90,6 +101,7 @@ impl TunnelCore {
             http_routes: DashMap::new(),
             tcp_routes: DashMap::new(),
             udp_routes: DashMap::new(),
+            p2p_tunnels: DashMap::new(),
             sessions: DashMap::new(),
             available_tcp_ports: Mutex::new(tcp_ports),
             available_udp_ports: Mutex::new(udp_ports),
@@ -305,6 +317,67 @@ impl TunnelCore {
         Ok((tunnel_id, port))
     }
 
+    /// Register a P2P publisher tunnel for `session_id`.
+    /// Returns `(tunnel_id, name)`.
+    pub fn register_p2p_tunnel(
+        &self,
+        session_id: &Uuid,
+        name: String,
+        secret_hash: String,
+    ) -> Result<(Uuid, String)> {
+        self.check_session_limit(session_id)?;
+
+        if self.p2p_tunnels.contains_key(&name) {
+            return Err(Error::Tunnel(format!(
+                "P2P tunnel name '{name}' is already in use"
+            )));
+        }
+
+        let tunnel_id = Uuid::new_v4();
+        let info = TunnelInfo {
+            session_id: *session_id,
+            tunnel_id,
+            protocol: TunnelProtocol::P2p,
+            subdomain: None,
+            assigned_port: None,
+            created_at: std::time::Instant::now(),
+            request_count: Arc::new(AtomicU64::new(0)),
+            bytes_proxied: Arc::new(AtomicU64::new(0)),
+            conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
+        };
+
+        let publisher = P2pPublisher {
+            tunnel_info: info,
+            secret_hash,
+            name: name.clone(),
+        };
+
+        self.p2p_tunnels.insert(name.clone(), publisher);
+        self.tunnel_index
+            .insert(tunnel_id, TunnelKey::P2p(name.clone()));
+        self.add_tunnel_to_session(session_id, tunnel_id);
+
+        Ok((tunnel_id, name))
+    }
+
+    /// Look up a P2P publisher by name and return it with the session control channel.
+    pub fn resolve_p2p(
+        &self,
+        name: &str,
+    ) -> Option<(P2pPublisher, mpsc::Sender<ControlMessage>)> {
+        let publisher = self.p2p_tunnels.get(name)?.clone();
+        let tx = self
+            .sessions
+            .get(&publisher.tunnel_info.session_id)?
+            .control_tx
+            .clone();
+        publisher
+            .tunnel_info
+            .request_count
+            .fetch_add(1, Ordering::Relaxed);
+        Some((publisher, tx))
+    }
+
     /// Remove a tunnel by ID, returning any allocated TCP/UDP port to the pool.
     pub fn remove_tunnel(&self, tunnel_id: &Uuid) {
         let Some((_, key)) = self.tunnel_index.remove(tunnel_id) else {
@@ -323,6 +396,9 @@ impl TunnelCore {
                 self.udp_routes.remove(&port);
                 self.available_udp_ports.lock().push(port);
                 let _ = self.udp_events.send(UdpTunnelEvent::Unregistered { port });
+            }
+            TunnelKey::P2p(name) => {
+                self.p2p_tunnels.remove(&name);
             }
         }
     }
@@ -346,6 +422,11 @@ impl TunnelCore {
                 .get(port)
                 .map(|t| t.request_count.load(Ordering::Relaxed))
                 .unwrap_or(0),
+            Some(TunnelKey::P2p(name)) => self
+                .p2p_tunnels
+                .get(name)
+                .map(|p| p.tunnel_info.request_count.load(Ordering::Relaxed))
+                .unwrap_or(0),
             None => 0,
         }
     }
@@ -368,6 +449,11 @@ impl TunnelCore {
                 .udp_routes
                 .get(port)
                 .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            Some(TunnelKey::P2p(name)) => self
+                .p2p_tunnels
+                .get(name)
+                .map(|p| p.tunnel_info.bytes_proxied.load(Ordering::Relaxed))
                 .unwrap_or(0),
             None => 0,
         }

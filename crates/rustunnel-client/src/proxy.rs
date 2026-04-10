@@ -55,6 +55,35 @@ pub async fn proxy_connection(yamux_stream: YamuxStream, local_addr: String, con
     }
 }
 
+/// Bridge a yamux stream with an already-accepted local TCP connection.
+/// Used by P2P subscribers — the local TCP connection was accepted on the
+/// subscriber's listener before the relay was established.
+pub async fn proxy_p2p_relay(
+    yamux_stream: YamuxStream,
+    mut local: tokio::net::TcpStream,
+    conn_id: Uuid,
+) {
+    debug!(%conn_id, "p2p relay: bridging local TCP ↔ yamux");
+    let _ = local.set_nodelay(true);
+    let mut remote = yamux_stream.compat();
+    let started = Instant::now();
+
+    match tokio::io::copy_bidirectional(&mut local, &mut remote).await {
+        Ok((up, down)) => {
+            info!(
+                %conn_id,
+                bytes_to_local = up,
+                bytes_to_tunnel = down,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "p2p relay: connection done"
+            );
+        }
+        Err(e) => {
+            debug!(%conn_id, "p2p relay: copy error: {e}");
+        }
+    }
+}
+
 /// Maximum UDP datagram size.
 const MAX_DATAGRAM_SIZE: usize = 65535;
 

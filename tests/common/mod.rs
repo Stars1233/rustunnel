@@ -508,6 +508,8 @@ impl TestClient {
             protocol: TunnelProtocol::Http,
             subdomain: subdomain.map(str::to_string),
             local_addr: "127.0.0.1:0".to_string(), // advisory only
+            p2p_secret_hash: None,
+            p2p_name: None,
         })
         .await?;
 
@@ -539,6 +541,8 @@ impl TestClient {
             protocol: TunnelProtocol::Tcp,
             subdomain: None,
             local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: None,
+            p2p_name: None,
         })
         .await?;
 

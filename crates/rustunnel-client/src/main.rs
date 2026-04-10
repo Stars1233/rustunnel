@@ -47,6 +47,9 @@ enum Commands {
     /// Start a UDP tunnel for a local port
     Udp(TunnelArgs),
 
+    /// Start a P2P tunnel (publish a service or connect to a peer)
+    P2p(P2pArgs),
+
     /// Start one or more tunnels defined in a config file
     Start(StartArgs),
 
@@ -88,6 +91,48 @@ struct TunnelArgs {
     no_reconnect: bool,
 
     /// Skip TLS certificate verification (local dev only — do not use in production)
+    #[arg(long)]
+    insecure: bool,
+}
+
+#[derive(Args, Clone)]
+struct P2pArgs {
+    /// Local port to forward
+    port: u16,
+
+    /// Shared secret for P2P authentication (both publisher and subscriber must match)
+    #[arg(long)]
+    secret: String,
+
+    /// Publish a service under this name (publisher mode)
+    #[arg(long, conflicts_with = "target")]
+    name: Option<String>,
+
+    /// Connect to a published P2P tunnel by name (subscriber mode)
+    #[arg(long, conflicts_with = "name")]
+    target: Option<String>,
+
+    /// Tunnel server address
+    #[arg(long)]
+    server: Option<String>,
+
+    /// Auth token (overrides config file)
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Local hostname to forward to
+    #[arg(long, default_value = "localhost")]
+    local_host: String,
+
+    /// Region to connect to
+    #[arg(long)]
+    region: Option<String>,
+
+    /// Disable automatic reconnection on failure
+    #[arg(long)]
+    no_reconnect: bool,
+
+    /// Skip TLS certificate verification (local dev only)
     #[arg(long)]
     insecure: bool,
 }
@@ -146,6 +191,7 @@ async fn run(cli: Cli) -> error::Result<()> {
         Commands::Http(args) => run_tunnel("http", args).await,
         Commands::Tcp(args) => run_tunnel("tcp", args).await,
         Commands::Udp(args) => run_tunnel("udp", args).await,
+        Commands::P2p(args) => run_p2p(args).await,
         Commands::Start(args) => run_start(args).await,
         Commands::Token(cmd) => run_token(cmd).await,
         Commands::Setup => run_setup().await,
@@ -186,6 +232,52 @@ async fn run_tunnel(proto: &str, args: TunnelArgs) -> error::Result<()> {
         &args.local_host,
         args.subdomain,
     )];
+
+    if args.no_reconnect {
+        control::connect(&cfg, &tunnels).await
+    } else {
+        reconnect::run_with_reconnect(cfg, tunnels).await;
+        Ok(())
+    }
+}
+
+async fn run_p2p(args: P2pArgs) -> error::Result<()> {
+    let mut cfg = ClientConfig::load_default()?;
+
+    if let Some(t) = args.token {
+        cfg.auth_token = Some(t);
+    }
+    if args.insecure {
+        cfg.insecure = true;
+    }
+    if let Some(explicit) = args.server {
+        cfg.server = explicit;
+    } else {
+        cfg.server = regions::resolve_server(
+            &cfg.server,
+            args.region.as_deref(),
+            cfg.region.as_deref(),
+            cfg.insecure,
+        )
+        .await;
+    }
+
+    cfg.validate()?;
+
+    // Determine publisher vs subscriber mode.
+    let tunnel = if let Some(name) = args.name {
+        // Publisher mode: expose a local service under a P2P name.
+        TunnelDef::p2p_publisher(args.port, &args.local_host, name, args.secret)
+    } else if let Some(target) = args.target {
+        // Subscriber mode: connect to a remote P2P tunnel.
+        TunnelDef::p2p_subscriber(args.port, &args.local_host, target, args.secret)
+    } else {
+        return Err(error::Error::Config(
+            "P2P mode requires either --name (publisher) or --target (subscriber)".into(),
+        ));
+    };
+
+    let tunnels = vec![tunnel];
 
     if args.no_reconnect {
         control::connect(&cfg, &tunnels).await

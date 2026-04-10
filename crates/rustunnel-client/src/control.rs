@@ -284,6 +284,12 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     let mut registered: Vec<(TunnelDef, String)> = Vec::new();
 
     for tunnel in tunnels {
+        // P2P subscribers don't register a tunnel — they send P2pConnect instead.
+        if tunnel.p2p_target.is_some() {
+            registered.push((tunnel.clone(), String::new()));
+            continue;
+        }
+
         let request_id = Uuid::new_v4().to_string();
         let protocol = proto_to_enum(&tunnel.proto)?;
         let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
@@ -295,6 +301,8 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 protocol,
                 subdomain: tunnel.subdomain.clone(),
                 local_addr,
+                p2p_secret_hash: tunnel.p2p_secret_hash.clone(),
+                p2p_name: tunnel.p2p_name.clone(),
             },
         )
         .await?;
@@ -318,6 +326,43 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     }
 
     sp.finish_and_clear();
+
+    // 3b. P2P subscriber: start local TCP listener ────────────────────────
+    // The subscriber listens on its local port. Each incoming connection
+    // triggers a P2pConnect to the server, establishing a relay on demand.
+    let p2p_sub_info: Option<(String, String)> = tunnels.iter().find_map(|t| {
+        match (&t.p2p_target, &t.p2p_secret_hash) {
+            (Some(target), Some(hash)) => Some((target.clone(), hash.clone())),
+            _ => None,
+        }
+    });
+
+    let p2p_accept_rx = if let Some(sub) = tunnels.iter().find(|t| t.p2p_target.is_some()) {
+        let addr = format!("{}:{}", sub.local_host, sub.local_port);
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            Error::Connection(format!("P2P subscriber: cannot bind {addr}: {e}"))
+        })?;
+        info!(%addr, "P2P subscriber listening for incoming connections");
+        let (tx, rx) = mpsc::channel::<tokio::net::TcpStream>(16);
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, peer)) => {
+                        debug!(%peer, "P2P subscriber: accepted local connection");
+                        if tx.send(stream).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("P2P subscriber: accept error: {e}");
+                    }
+                }
+            }
+        });
+        Some(rx)
+    } else {
+        None
+    };
 
     // 4. Data WebSocket (yamux) ————————————————————————————————————————————
     let data_conn: Option<DataConn> =
@@ -359,12 +404,15 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         &config.server,
         session_id,
         config.insecure,
+        p2p_accept_rx,
+        p2p_sub_info,
     )
     .await
 }
 
 // ── main loop ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn main_loop(
     ctrl_ws: &mut CtrlWs,
     mut stream_rx: mpsc::Receiver<(Uuid, YamuxStream)>,
@@ -372,6 +420,8 @@ async fn main_loop(
     server: &str,
     session_id: Uuid,
     insecure: bool,
+    mut p2p_accept_rx: Option<mpsc::Receiver<tokio::net::TcpStream>>,
+    p2p_sub_info: Option<(String, String)>, // (target_name, secret_hash)
 ) -> Result<()> {
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip the immediate first tick
@@ -387,9 +437,39 @@ async fn main_loop(
     let mut pending_streams: std::collections::HashMap<Uuid, YamuxStream> =
         std::collections::HashMap::new();
 
+    // P2P subscriber state: maps conn_id → already-accepted local TCP stream.
+    // When the yamux stream arrives for this conn_id, we bridge them directly
+    // instead of opening a new outbound connection.
+    let mut p2p_request_to_local: std::collections::HashMap<String, tokio::net::TcpStream> =
+        std::collections::HashMap::new();
+    let mut p2p_local_streams: std::collections::HashMap<Uuid, tokio::net::TcpStream> =
+        std::collections::HashMap::new();
+
+    // Dummy future that never resolves — used when there's no P2P listener.
+    let p2p_disabled_rx = &mut None::<mpsc::Receiver<tokio::net::TcpStream>>;
+
     loop {
+        // Pick the right P2P accept channel (real or disabled).
+        let p2p_rx = p2p_accept_rx.as_mut().unwrap_or(
+            p2p_disabled_rx.get_or_insert_with(|| mpsc::channel(1).1),
+        );
+
         tokio::select! {
             biased;
+
+            // ── P2P subscriber: accepted local TCP connection ─────────────
+            Some(local_stream) = p2p_rx.recv() => {
+                if let Some((ref target, ref secret_hash)) = p2p_sub_info {
+                    let request_id = Uuid::new_v4().to_string();
+                    debug!(%request_id, target, "P2P subscriber: sending connect for local connection");
+                    send_frame(ctrl_ws, &ControlFrame::P2pConnect {
+                        request_id: request_id.clone(),
+                        target_tunnel_name: target.clone(),
+                        secret_hash: secret_hash.clone(),
+                    }).await?;
+                    p2p_request_to_local.insert(request_id, local_stream);
+                }
+            }
 
             // ── Ctrl-C / SIGTERM ──────────────────────────────────────────
             _ = tokio::signal::ctrl_c() => {
@@ -412,7 +492,12 @@ async fn main_loop(
             pair = stream_rx.recv() => {
                 match pair {
                     Some((conn_id, stream)) => {
-                        if let Some((local_addr, protocol)) = pending_conns.remove(&conn_id) {
+                        // Check if this is a P2P subscriber stream with an
+                        // already-accepted local TCP connection.
+                        if let Some(local_tcp) = p2p_local_streams.remove(&conn_id) {
+                            debug!(%conn_id, "P2P subscriber: bridging local TCP ↔ yamux");
+                            tokio::spawn(proxy::proxy_p2p_relay(stream, local_tcp, conn_id));
+                        } else if let Some((local_addr, protocol)) = pending_conns.remove(&conn_id) {
                             // NewConnection arrived earlier — proxy immediately.
                             if protocol == TunnelProtocol::Udp {
                                 tokio::spawn(proxy::proxy_udp_connection(stream, local_addr, conn_id));
@@ -476,6 +561,15 @@ async fn main_loop(
                             ControlFrame::NewConnection { conn_id, client_addr, protocol } => {
                                 debug!(%conn_id, %client_addr, ?protocol, "new connection from server");
 
+                                // For P2P subscriber connections, the local TCP
+                                // stream is already accepted and stored in
+                                // p2p_local_streams. The bridge will happen when
+                                // the yamux stream arrives. Skip normal proxy.
+                                if p2p_local_streams.contains_key(&conn_id) {
+                                    debug!(%conn_id, "P2P subscriber: NewConnection for pending relay — skip proxy");
+                                    continue;
+                                }
+
                                 match find_local_addr(registered, &protocol) {
                                     None => {
                                         warn!(%conn_id, ?protocol,
@@ -499,6 +593,28 @@ async fn main_loop(
                                         }
                                     }
                                 }
+                            }
+
+                            ControlFrame::P2pConnected { request_id, conn_id } => {
+                                debug!(%conn_id, %request_id, "P2P relay established");
+                                // Move the pre-accepted local TCP stream from
+                                // request_id map to conn_id map. When the yamux
+                                // stream arrives, we'll bridge them.
+                                if let Some(local) = p2p_request_to_local.remove(&request_id) {
+                                    // Check if yamux stream already arrived.
+                                    if let Some(yamux) = pending_streams.remove(&conn_id) {
+                                        debug!(%conn_id, "P2P: yamux already arrived — bridging");
+                                        tokio::spawn(proxy::proxy_p2p_relay(yamux, local, conn_id));
+                                    } else {
+                                        p2p_local_streams.insert(conn_id, local);
+                                    }
+                                }
+                            }
+
+                            ControlFrame::P2pError { request_id, message } => {
+                                warn!(%request_id, %message, "P2P connect failed");
+                                // Drop the local TCP stream — connection refused to peer.
+                                p2p_request_to_local.remove(&request_id);
                             }
 
                             ControlFrame::Ping { timestamp } => {
@@ -598,6 +714,7 @@ fn proto_to_enum(proto: &str) -> Result<TunnelProtocol> {
         "https" => Ok(TunnelProtocol::Https),
         "tcp" => Ok(TunnelProtocol::Tcp),
         "udp" => Ok(TunnelProtocol::Udp),
+        "p2p" => Ok(TunnelProtocol::P2p),
         other => Err(Error::Config(format!("unknown protocol: {other}"))),
     }
 }
@@ -616,6 +733,7 @@ fn find_local_addr(
             }
             TunnelProtocol::Tcp => def.proto == "tcp",
             TunnelProtocol::Udp => def.proto == "udp",
+            TunnelProtocol::P2p => def.proto == "p2p",
         };
         if matches {
             return Some(format!("{}:{}", def.local_host, def.local_port));

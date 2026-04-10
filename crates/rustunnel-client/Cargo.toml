@@ -30,3 +30,5 @@ indicatif = { workspace = true }
 rand = { workspace = true }
 dirs = { workspace = true }
 reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

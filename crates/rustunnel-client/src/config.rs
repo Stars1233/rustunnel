@@ -38,7 +38,7 @@ pub struct ClientConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TunnelDef {
-    /// Protocol: `"http"`, `"tcp"`, or `"udp"`.
+    /// Protocol: `"http"`, `"tcp"`, `"udp"`, or `"p2p"`.
     pub proto: String,
     /// Local port to forward to.
     pub local_port: u16,
@@ -47,6 +47,16 @@ pub struct TunnelDef {
     pub local_host: String,
     /// Requested HTTP subdomain (HTTP tunnels only).
     pub subdomain: Option<String>,
+    /// SHA-256 hash of a shared secret (P2P publisher only, computed from `p2p_secret`).
+    #[serde(skip)]
+    pub p2p_secret_hash: Option<String>,
+    /// Human-readable tunnel name for P2P discovery (P2P publisher only).
+    pub p2p_name: Option<String>,
+    /// Name of the P2P tunnel to connect to (P2P subscriber only).
+    pub p2p_target: Option<String>,
+    /// Shared secret for P2P authentication (used by Phase 3 direct P2P).
+    #[allow(dead_code)]
+    pub p2p_secret: Option<String>,
 }
 
 fn default_local_host() -> String {
@@ -61,6 +71,52 @@ impl TunnelDef {
             local_port: port,
             local_host: local_host.to_string(),
             subdomain,
+            p2p_secret_hash: None,
+            p2p_name: None,
+            p2p_target: None,
+            p2p_secret: None,
+        }
+    }
+
+    /// Build a P2P publisher `TunnelDef`.
+    pub fn p2p_publisher(
+        port: u16,
+        local_host: &str,
+        name: String,
+        secret: String,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        let hash = hex::encode(Sha256::digest(secret.as_bytes()));
+        Self {
+            proto: "p2p".to_string(),
+            local_port: port,
+            local_host: local_host.to_string(),
+            subdomain: None,
+            p2p_secret_hash: Some(hash),
+            p2p_name: Some(name),
+            p2p_target: None,
+            p2p_secret: Some(secret),
+        }
+    }
+
+    /// Build a P2P subscriber `TunnelDef`.
+    pub fn p2p_subscriber(
+        port: u16,
+        local_host: &str,
+        target: String,
+        secret: String,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        let hash = hex::encode(Sha256::digest(secret.as_bytes()));
+        Self {
+            proto: "p2p".to_string(),
+            local_port: port,
+            local_host: local_host.to_string(),
+            subdomain: None,
+            p2p_secret_hash: Some(hash),
+            p2p_name: None,
+            p2p_target: Some(target),
+            p2p_secret: Some(secret),
         }
     }
 }
