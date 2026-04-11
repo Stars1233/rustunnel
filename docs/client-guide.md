@@ -13,6 +13,8 @@
    - [setup — Interactive config wizard](#setup--interactive-config-wizard)
    - [http — HTTP tunnel](#http--http-tunnel)
    - [tcp — TCP tunnel](#tcp--tcp-tunnel)
+   - [udp — UDP tunnel](#udp--udp-tunnel)
+   - [p2p — Peer-to-peer tunnel](#p2p--peer-to-peer-tunnel)
    - [start — Multi-tunnel mode](#start--multi-tunnel-mode)
    - [token create — API token management](#token-create--api-token-management)
 5. [Flags Reference](#flags-reference)
@@ -67,6 +69,12 @@ rustunnel http 3000
 
 # 4. Expose a raw TCP service (e.g. SSH on port 22)
 rustunnel tcp 22
+
+# 5. Expose a UDP service (e.g. game server)
+rustunnel udp 27015
+
+# 6. P2P tunnel — expose a service to another client
+rustunnel p2p 27015 --name my-game --secret "shared-secret"
 ```
 
 After connecting, the terminal displays the public URL:
@@ -120,6 +128,16 @@ tunnels:
   database:
     proto: tcp
     local_port: 5432
+
+  gameserver:
+    proto: udp
+    local_port: 27015
+
+  p2p-publish:
+    proto: p2p
+    local_port: 27015
+    p2p_name: my-game
+    p2p_secret: shared-secret-123
 ```
 
 ### Field reference
@@ -131,10 +149,13 @@ tunnels:
 | `insecure` | bool | `false` | Skip TLS certificate verification (dev only) |
 | `region` | string | omit | `auto` (probe nearest), `eu`, `us`, `ap`. Omit for self-hosted setups. |
 | `tunnels` | map | `{}` | Named tunnel definitions (used by `rustunnel start`) |
-| `tunnels.<name>.proto` | string | — | `http` or `tcp` |
+| `tunnels.<name>.proto` | string | — | `http`, `tcp`, `udp`, or `p2p` |
 | `tunnels.<name>.local_port` | integer | — | Local port to forward |
 | `tunnels.<name>.local_host` | string | `localhost` | Local hostname to connect to |
 | `tunnels.<name>.subdomain` | string | auto-assigned | Requested HTTP subdomain |
+| `tunnels.<name>.p2p_name` | string | — | P2P publisher tunnel name (P2P only) |
+| `tunnels.<name>.p2p_target` | string | — | P2P subscriber target name (P2P only) |
+| `tunnels.<name>.p2p_secret` | string | — | Shared secret for P2P authentication |
 
 ---
 
@@ -319,6 +340,79 @@ rustunnel tcp 2222 --local-host 10.0.0.5
 ```
 
 The server assigns a random public port from its configured TCP port range. The public address is displayed in the startup box.
+
+---
+
+### `udp` — UDP tunnel
+
+Expose a local UDP service (game server, DNS, VoIP, etc.).
+
+```
+rustunnel udp <port> [options]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<port>` | Local UDP port to forward |
+
+**Options:** Same as `http` except `--subdomain` has no effect. `--region` still works.
+
+**Examples:**
+
+```bash
+# Expose a game server
+rustunnel udp 27015
+
+# Expose a DNS service
+rustunnel udp 53 --local-host 10.0.0.1
+```
+
+The server assigns a random public UDP port from its configured UDP port range. Incoming datagrams are forwarded to the local service; responses are sent back to the original sender. Sessions are tracked by remote address and expire after 60 seconds of inactivity.
+
+---
+
+### `p2p` — Peer-to-peer tunnel
+
+Connect two rustunnel clients directly. One client acts as a **publisher** (exposes a service), the other as a **subscriber** (connects to it). Data is relayed through the server.
+
+```
+rustunnel p2p <port> --name <name> --secret <secret>     # publisher
+rustunnel p2p <port> --target <name> --secret <secret>    # subscriber
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<port>` | Local port — the service port (publisher) or the listener port (subscriber) |
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Publish a service under this name (publisher mode) |
+| `--target <name>` | Connect to a published tunnel by name (subscriber mode) |
+| `--secret <secret>` | Shared secret for authentication (both sides must match) |
+| `--server`, `--token`, `--region`, `--insecure`, `--no-reconnect` | Same as other tunnel types |
+
+`--name` and `--target` are mutually exclusive. One of them is required.
+
+**Examples:**
+
+```bash
+# Publisher: expose a game server under the name "my-game"
+rustunnel p2p 27015 --name my-game --secret "shared-secret-123"
+
+# Subscriber: connect to "my-game" and listen on local port 8000
+rustunnel p2p 8000 --target my-game --secret "shared-secret-123"
+
+# Any app connecting to localhost:8000 on the subscriber's machine
+# will be forwarded to localhost:27015 on the publisher's machine.
+```
+
+See the [P2P Tunnels reference](p2p-tunnels.md) for details on relay mode, direct mode, NAT classification, and hole punching.
 
 ---
 

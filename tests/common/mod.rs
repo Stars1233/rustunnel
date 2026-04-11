@@ -183,12 +183,15 @@ impl TestServer {
         // Atomically reserve a 10-port range so parallel tests never overlap.
         let tcp_low = alloc_tcp_port_range(10);
         let tcp_high = tcp_low + 9;
+        let udp_low = alloc_tcp_port_range(10);
+        let udp_high = udp_low + 9;
         Self::start_on_ports(
             control_port,
             http_port,
             https_port,
             dashboard_port,
             [tcp_low, tcp_high],
+            [udp_low, udp_high],
             require_auth,
             admin_token,
         )
@@ -197,12 +200,14 @@ impl TestServer {
 
     /// Start a server on specific pre-allocated ports.
     /// Used by reconnect tests to restart on the same port set.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_on_ports(
         control_port: u16,
         http_port: u16,
         https_port: u16,
         dashboard_port: u16,
         tcp_port_range: [u16; 2],
+        udp_port_range: [u16; 2],
         require_auth: bool,
         admin_token: &str,
     ) -> Self {
@@ -255,7 +260,7 @@ impl TestServer {
                 ip_rate_limit_rps: 100_000,
                 request_body_max_bytes: 1024 * 1024,
                 tcp_port_range: [tcp_low, tcp_high],
-                udp_port_range: [0, 0],
+                udp_port_range,
             },
             region: RegionSection {
                 id: "test".to_string(),
@@ -556,6 +561,85 @@ impl TestClient {
                 Ok((tunnel_id, port))
             }
             ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
+    }
+
+    /// Register a UDP tunnel.  Returns `(tunnel_id, assigned_port)`.
+    pub async fn register_udp_tunnel(&mut self) -> Result<(Uuid, u16), String> {
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::RegisterTunnel {
+            request_id: req_id,
+            protocol: TunnelProtocol::Udp,
+            subdomain: None,
+            local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: None,
+            p2p_name: None,
+        })
+        .await?;
+
+        match self.recv_timeout(Duration::from_secs(5)).await? {
+            ControlFrame::TunnelRegistered {
+                tunnel_id,
+                assigned_port,
+                ..
+            } => {
+                let port = assigned_port.ok_or("missing assigned_port")?;
+                Ok((tunnel_id, port))
+            }
+            ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
+    }
+
+    /// Register a P2P publisher tunnel.  Returns `(tunnel_id, name)`.
+    pub async fn register_p2p_tunnel(
+        &mut self,
+        name: &str,
+        secret_hash: &str,
+    ) -> Result<(Uuid, String), String> {
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::RegisterTunnel {
+            request_id: req_id,
+            protocol: TunnelProtocol::P2p,
+            subdomain: None,
+            local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: Some(secret_hash.to_string()),
+            p2p_name: Some(name.to_string()),
+        })
+        .await?;
+
+        match self.recv_timeout(Duration::from_secs(5)).await? {
+            ControlFrame::TunnelRegistered {
+                tunnel_id,
+                p2p_tunnel_name,
+                ..
+            } => {
+                let tname = p2p_tunnel_name.ok_or("missing p2p_tunnel_name")?;
+                Ok((tunnel_id, tname))
+            }
+            ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
+    }
+
+    /// Send a P2pConnect request. Returns the conn_id on success.
+    pub async fn p2p_connect(
+        &mut self,
+        target: &str,
+        secret_hash: &str,
+    ) -> Result<Uuid, String> {
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::P2pConnect {
+            request_id: req_id,
+            target_tunnel_name: target.to_string(),
+            secret_hash: secret_hash.to_string(),
+        })
+        .await?;
+
+        match self.recv_timeout(Duration::from_secs(10)).await? {
+            ControlFrame::P2pConnected { conn_id, .. } => Ok(conn_id),
+            ControlFrame::P2pError { message, .. } => Err(format!("P2pError: {message}")),
             other => Err(format!("unexpected frame: {other:?}")),
         }
     }

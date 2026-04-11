@@ -46,3 +46,11 @@ path = "integration/reconnect.rs"
 [[test]]
 name = "data_ws_reconnect"
 path = "integration/data_ws_reconnect.rs"
+
+[[test]]
+name = "udp_tunnel"
+path = "integration/udp_tunnel.rs"
+
+[[test]]
+name = "p2p_tunnel"
+path = "integration/p2p_tunnel.rs"

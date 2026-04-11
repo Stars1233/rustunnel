@@ -119,6 +119,7 @@ async fn tcp_tunnel_works_after_server_restart() {
         https_port,
         dashboard_port,
         tcp_port_range,
+        [0, 0],
         true,
         admin_token,
     )
@@ -206,6 +207,7 @@ async fn new_client_auth_succeeds_after_restart() {
         https_port,
         dashboard_port,
         tcp_port_range,
+        [0, 0],
         true,
         admin_token,
     )
