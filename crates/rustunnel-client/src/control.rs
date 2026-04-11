@@ -360,9 +360,14 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     // 3c. P2P subscriber: start local TCP listener ────────────────────────
     // The subscriber listens on its local port. Each incoming connection
     // triggers a P2pConnect to the server, establishing a relay on demand.
-    let p2p_sub_info: Option<(String, String)> = tunnels.iter().find_map(|t| {
-        match (&t.p2p_target, &t.p2p_secret_hash) {
-            (Some(target), Some(hash)) => Some((target.clone(), hash.clone())),
+    let p2p_sub_info: Option<(String, String, Vec<u8>)> = tunnels.iter().find_map(|t| {
+        match (&t.p2p_target, &t.p2p_secret_hash, &t.p2p_secret) {
+            (Some(target), Some(hash), Some(secret)) => {
+                Some((target.clone(), hash.clone(), secret.as_bytes().to_vec()))
+            }
+            (Some(target), Some(hash), None) => {
+                Some((target.clone(), hash.clone(), Vec::new()))
+            }
             _ => None,
         }
     });
@@ -451,7 +456,7 @@ async fn main_loop(
     session_id: Uuid,
     insecure: bool,
     mut p2p_accept_rx: Option<mpsc::Receiver<tokio::net::TcpStream>>,
-    p2p_sub_info: Option<(String, String)>, // (target_name, secret_hash)
+    p2p_sub_info: Option<(String, String, Vec<u8>)>, // (target_name, secret_hash, raw_secret)
 ) -> Result<()> {
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip the immediate first tick
@@ -489,7 +494,7 @@ async fn main_loop(
 
             // ── P2P subscriber: accepted local TCP connection ─────────────
             Some(local_stream) = p2p_rx.recv() => {
-                if let Some((ref target, ref secret_hash)) = p2p_sub_info {
+                if let Some((ref target, ref secret_hash, _)) = p2p_sub_info {
                     let request_id = Uuid::new_v4().to_string();
                     debug!(%request_id, target, "P2P subscriber: sending connect for local connection");
                     send_frame(ctrl_ws, &ControlFrame::P2pConnect {
@@ -656,13 +661,16 @@ async fn main_loop(
                                     .iter()
                                     .filter_map(|a| a.parse().ok())
                                     .collect();
+                                let secret_bytes = p2p_sub_info.as_ref()
+                                    .map(|(_, _, s)| s.clone())
+                                    .unwrap_or_default();
                                 if !addrs.is_empty() {
                                     tokio::spawn(async move {
                                         let result = crate::p2p_direct::attempt_direct_connection(
                                             &addrs,
                                             &strategy,
                                             "subscriber",
-                                            b"", // shared secret for QUIC — TODO: pass from p2p_sub_info
+                                            &secret_bytes,
                                             punch_timeout_ms,
                                         )
                                         .await;
