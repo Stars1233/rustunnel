@@ -14,6 +14,44 @@ pub struct ServerConfig {
     /// Region identity for this server instance.
     #[serde(default)]
     pub region: RegionSection,
+    /// P2P direct connection settings.
+    #[serde(default)]
+    pub p2p: P2pSection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct P2pSection {
+    /// Enable P2P direct mode (NAT hole punching). When false, all P2P
+    /// connections use server relay only.
+    #[serde(default)]
+    pub direct_enabled: bool,
+    /// STUN servers for NAT type detection (client-side configuration hint).
+    #[serde(default = "default_stun_servers")]
+    pub stun_servers: Vec<String>,
+    /// Hole punch timeout in milliseconds.
+    #[serde(default = "default_punch_timeout_ms")]
+    pub punch_timeout_ms: u32,
+}
+
+fn default_stun_servers() -> Vec<String> {
+    vec![
+        "stun.l.google.com:19302".into(),
+        "stun1.l.google.com:19302".into(),
+    ]
+}
+
+fn default_punch_timeout_ms() -> u32 {
+    5000
+}
+
+impl Default for P2pSection {
+    fn default() -> Self {
+        Self {
+            direct_enabled: false,
+            stun_servers: default_stun_servers(),
+            punch_timeout_ms: default_punch_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +289,7 @@ impl Default for ServerConfig {
                 name: "Test Region".to_string(),
                 location: "localhost".to_string(),
             },
+            p2p: P2pSection::default(),
         }
     }
 }

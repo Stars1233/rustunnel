@@ -57,6 +57,9 @@ pub struct TunnelDef {
     /// Shared secret for P2P authentication (used by Phase 3 direct P2P).
     #[allow(dead_code)]
     pub p2p_secret: Option<String>,
+    /// Tunnel ID assigned by the server after registration (runtime only, not serialized).
+    #[serde(skip)]
+    pub registered_tunnel_id: Option<uuid::Uuid>,
 }
 
 fn default_local_host() -> String {
@@ -75,6 +78,7 @@ impl TunnelDef {
             p2p_name: None,
             p2p_target: None,
             p2p_secret: None,
+            registered_tunnel_id: None,
         }
     }
 
@@ -96,6 +100,7 @@ impl TunnelDef {
             p2p_name: Some(name),
             p2p_target: None,
             p2p_secret: Some(secret),
+            registered_tunnel_id: None,
         }
     }
 
@@ -117,6 +122,7 @@ impl TunnelDef {
             p2p_name: None,
             p2p_target: Some(target),
             p2p_secret: Some(secret),
+            registered_tunnel_id: None,
         }
     }
 }

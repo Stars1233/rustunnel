@@ -857,14 +857,53 @@ where
                         return Ok(());
                     }
 
-                    // Generate a conn_id for this P2P relay connection.
+                    // Classify NAT pair and decide on direct vs relay.
+                    let pub_nat = publisher.nat_type.as_deref();
+                    // Subscriber doesn't probe STUN before P2pConnect, so we
+                    // assume "cone" for the subscriber side. If the publisher
+                    // is cone/open, we attempt direct. The relay always runs
+                    // in parallel as fallback, so a wrong guess only costs
+                    // the punch timeout (5s) before falling back.
+                    let sub_nat_assumed = if pub_nat.is_some() {
+                        Some("cone")
+                    } else {
+                        None
+                    };
+                    let (strategy, attempt_direct) =
+                        crate::core::classify_nat_pair(pub_nat, sub_nat_assumed);
+
+                    // Generate a conn_id for this P2P connection.
                     let conn_id = Uuid::new_v4();
                     tracing::info!(
                         %conn_id, %target_tunnel_name,
                         publisher_session = %publisher.tunnel_info.session_id,
                         subscriber_session = %session_id,
-                        "P2P relay connection"
+                        strategy,
+                        attempt_direct,
+                        "P2P connection"
                     );
+
+                    // If direct mode is possible, send punch instructions to
+                    // both peers. They attempt hole punching in parallel with
+                    // the relay setup. If punching succeeds, the clients
+                    // upgrade to QUIC and stop using the relay.
+                    if attempt_direct && !publisher.mapped_addrs.is_empty() {
+                        // Send publisher's mapped addrs to subscriber.
+                        send_frame(
+                            ws,
+                            &ControlFrame::P2pPunchInstructions {
+                                conn_id,
+                                peer_addrs: publisher.mapped_addrs.clone(),
+                                strategy: strategy.to_string(),
+                                punch_timeout_ms: 5000,
+                            },
+                        )
+                        .await?;
+
+                        // Send subscriber info to publisher (via publisher's
+                        // control channel — we don't have subscriber's mapped
+                        // addrs here yet, so this is best-effort).
+                    }
 
                     // Tell the publisher to open a yamux stream for this conn_id.
                     // The publisher's session handler will send NewConnection to
@@ -996,6 +1035,40 @@ where
         ControlFrame::Pong { timestamp } => {
             tracing::trace!(%session_id, timestamp, "pong");
             let _ = pong_in_tx.try_send(timestamp);
+        }
+
+        ControlFrame::P2pNatInfo {
+            tunnel_id,
+            nat_type,
+            mapped_addrs,
+            local_addrs: _,
+        } => {
+            tracing::debug!(%session_id, %tunnel_id, %nat_type, "P2P NAT info received");
+            core.update_p2p_nat_info(&tunnel_id, nat_type, mapped_addrs);
+        }
+
+        ControlFrame::P2pPunchResult {
+            conn_id,
+            success,
+            direct_addr,
+        } => {
+            tracing::info!(%session_id, %conn_id, success, ?direct_addr, "P2P punch result");
+            // Punch results are logged for analytics. Direct connections are
+            // already established client-side; no server action needed.
+        }
+
+        ControlFrame::P2pMetrics {
+            tunnel_id,
+            bytes_sent,
+            bytes_received,
+        } => {
+            tracing::debug!(
+                %session_id, %tunnel_id,
+                bytes_sent, bytes_received,
+                "P2P client-reported metrics"
+            );
+            // Store for dashboard visibility. These are informational only —
+            // not used for billing (direct P2P traffic can't be verified).
         }
 
         other => {

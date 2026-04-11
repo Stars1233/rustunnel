@@ -32,3 +32,6 @@ dirs = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+quinn = { workspace = true }
+socket2 = { workspace = true }
+rcgen = { workspace = true }

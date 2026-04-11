@@ -308,9 +308,12 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         .await?;
 
         match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT).await? {
-            ControlFrame::TunnelRegistered { public_url, .. } => {
-                info!(%public_url, "tunnel registered");
-                registered.push((tunnel.clone(), public_url));
+            ControlFrame::TunnelRegistered { public_url, tunnel_id, .. } => {
+                info!(%public_url, %tunnel_id, "tunnel registered");
+                // Store tunnel_id on the TunnelDef for later use (P2P NAT info).
+                let mut tdef = tunnel.clone();
+                tdef.registered_tunnel_id = Some(tunnel_id);
+                registered.push((tdef, public_url));
             }
             ControlFrame::TunnelError { message, .. } => {
                 sp.finish_and_clear();
@@ -327,7 +330,34 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
 
     sp.finish_and_clear();
 
-    // 3b. P2P subscriber: start local TCP listener ────────────────────────
+    // 3b. P2P publisher: probe NAT and report to server ──────────────────
+    for (tunnel, _url) in &registered {
+        if let (Some(_name), Some(tid)) = (&tunnel.p2p_name, tunnel.registered_tunnel_id) {
+            info!("P2P publisher: probing NAT type via STUN...");
+            let stun_result = crate::stun::probe_nat(&[]).await;
+            info!(
+                nat = stun_result.nat_type.as_str(),
+                mapped = ?stun_result.mapped_addrs,
+                "P2P publisher: NAT classification complete"
+            );
+
+            let mapped: Vec<String> = stun_result.mapped_addrs.iter().map(|a| a.to_string()).collect();
+            let locals: Vec<String> = stun_result.local_addrs.iter().map(|a| a.to_string()).collect();
+
+            send_frame(
+                &mut ctrl_ws,
+                &ControlFrame::P2pNatInfo {
+                    tunnel_id: tid,
+                    nat_type: stun_result.nat_type.as_str().to_string(),
+                    mapped_addrs: mapped,
+                    local_addrs: locals,
+                },
+            )
+            .await?;
+        }
+    }
+
+    // 3c. P2P subscriber: start local TCP listener ────────────────────────
     // The subscriber listens on its local port. Each incoming connection
     // triggers a P2pConnect to the server, establishing a relay on demand.
     let p2p_sub_info: Option<(String, String)> = tunnels.iter().find_map(|t| {
@@ -608,6 +638,44 @@ async fn main_loop(
                                     } else {
                                         p2p_local_streams.insert(conn_id, local);
                                     }
+                                }
+                            }
+
+                            ControlFrame::P2pPunchInstructions {
+                                conn_id,
+                                peer_addrs,
+                                strategy,
+                                punch_timeout_ms,
+                            } => {
+                                info!(%conn_id, %strategy, ?peer_addrs, "P2P direct: received punch instructions");
+                                // Attempt hole punching in the background.
+                                // If successful, the direct connection replaces
+                                // the relay. If it fails, the relay continues
+                                // to work transparently.
+                                let addrs: Vec<std::net::SocketAddr> = peer_addrs
+                                    .iter()
+                                    .filter_map(|a| a.parse().ok())
+                                    .collect();
+                                if !addrs.is_empty() {
+                                    tokio::spawn(async move {
+                                        let result = crate::p2p_direct::attempt_direct_connection(
+                                            &addrs,
+                                            &strategy,
+                                            "subscriber",
+                                            b"", // shared secret for QUIC — TODO: pass from p2p_sub_info
+                                            punch_timeout_ms,
+                                        )
+                                        .await;
+                                        match result {
+                                            Some(_conn) => {
+                                                info!(%conn_id, "P2P direct: connection established (upgrade from relay)");
+                                                // TODO: replace relay with direct QUIC connection
+                                            }
+                                            None => {
+                                                debug!(%conn_id, "P2P direct: punch failed — continuing with relay");
+                                            }
+                                        }
+                                    });
                                 }
                             }
 

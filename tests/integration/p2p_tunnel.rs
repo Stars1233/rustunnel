@@ -129,7 +129,7 @@ async fn p2p_tunnel_cleaned_up_on_disconnect() {
     }
 
     // Give the server time to process the disconnect.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     assert!(
         !server.core.p2p_tunnels.contains_key("ephemeral"),

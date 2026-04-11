@@ -90,6 +90,39 @@ pub enum ControlFrame {
         request_id: String,
         message: String,
     },
+
+    // ── P2P direct (Phase 3) ─────────────────────────────────────────────
+
+    /// Client reports its NAT type and mapped addresses after STUN probing.
+    /// Sent by both publisher and subscriber during P2P setup.
+    P2pNatInfo {
+        tunnel_id: Uuid,
+        nat_type: String,
+        mapped_addrs: Vec<String>,
+        local_addrs: Vec<String>,
+    },
+
+    /// Server sends each peer the other's NAT info and hole-punch instructions.
+    P2pPunchInstructions {
+        conn_id: Uuid,
+        peer_addrs: Vec<String>,
+        strategy: String,
+        punch_timeout_ms: u32,
+    },
+
+    /// Client reports hole-punch result back to the server.
+    P2pPunchResult {
+        conn_id: Uuid,
+        success: bool,
+        direct_addr: Option<String>,
+    },
+
+    /// Client periodically reports bandwidth for direct P2P connections.
+    P2pMetrics {
+        tunnel_id: Uuid,
+        bytes_sent: u64,
+        bytes_received: u64,
+    },
 }
 
 pub fn encode_frame(frame: &ControlFrame) -> Vec<u8> {

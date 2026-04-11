@@ -67,6 +67,28 @@ pub struct P2pPublisher {
     pub tunnel_info: TunnelInfo,
     pub secret_hash: String,
     pub name: String,
+    /// NAT type reported by the publisher client (set via P2pNatInfo).
+    pub nat_type: Option<String>,
+    /// Public mapped addresses from STUN probing.
+    pub mapped_addrs: Vec<String>,
+}
+
+/// Classify a NAT pair and return the hole-punching strategy.
+///
+/// Returns `("strategy_name", should_attempt_direct)`.
+pub fn classify_nat_pair(pub_nat: Option<&str>, sub_nat: Option<&str>) -> (&'static str, bool) {
+    match (pub_nat, sub_nat) {
+        // Both cone or open — direct exchange, high success rate.
+        (Some("open" | "cone"), Some("open" | "cone")) => ("direct_exchange", true),
+        // One cone + one symmetric — port prediction, moderate success.
+        (Some("cone" | "open"), Some("symmetric")) | (Some("symmetric"), Some("cone" | "open")) => {
+            ("port_prediction", true)
+        }
+        // Both symmetric — skip, use relay.
+        (Some("symmetric"), Some("symmetric")) => ("relay", false),
+        // Unknown or missing — skip, use relay.
+        _ => ("relay", false),
+    }
 }
 
 /// Identifies where a tunnel lives in the routing tables.
@@ -350,6 +372,8 @@ impl TunnelCore {
             tunnel_info: info,
             secret_hash,
             name: name.clone(),
+            nat_type: None,
+            mapped_addrs: Vec::new(),
         };
 
         self.p2p_tunnels.insert(name.clone(), publisher);
@@ -376,6 +400,21 @@ impl TunnelCore {
             .request_count
             .fetch_add(1, Ordering::Relaxed);
         Some((publisher, tx))
+    }
+
+    /// Update the NAT info for a P2P publisher tunnel.
+    pub fn update_p2p_nat_info(
+        &self,
+        tunnel_id: &Uuid,
+        nat_type: String,
+        mapped_addrs: Vec<String>,
+    ) {
+        if let Some(TunnelKey::P2p(name)) = self.tunnel_index.get(tunnel_id).as_deref().cloned() {
+            if let Some(mut publisher) = self.p2p_tunnels.get_mut(&name) {
+                publisher.nat_type = Some(nat_type);
+                publisher.mapped_addrs = mapped_addrs;
+            }
+        }
     }
 
     /// Remove a tunnel by ID, returning any allocated TCP/UDP port to the pool.

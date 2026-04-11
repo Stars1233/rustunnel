@@ -10,9 +10,11 @@ mod config;
 mod control;
 mod display;
 mod error;
+mod p2p_direct;
 mod proxy;
 mod reconnect;
 mod regions;
+mod stun;
 
 use std::path::PathBuf;
 

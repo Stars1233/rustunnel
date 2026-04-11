@@ -34,6 +34,11 @@ request_body_max_bytes     = 10485760 # 10 MB
 tcp_port_range             = [20000, 20099]
 udp_port_range             = [20100, 20199]
 
+[p2p]
+direct_enabled       = true
+stun_servers         = ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
+punch_timeout_ms     = 5000
+
 [region]
 id       = "local"
 name     = "Local Dev"

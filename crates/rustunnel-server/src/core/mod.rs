@@ -5,5 +5,5 @@ pub mod tunnel;
 
 pub use ip_limiter::IpRateLimiter;
 pub use limiter::RateLimiter;
-pub use router::{P2pPublisher, TunnelCore};
+pub use router::{classify_nat_pair, P2pPublisher, TunnelCore};
 pub use tunnel::{ControlMessage, SessionInfo, TcpTunnelEvent, TunnelInfo, UdpTunnelEvent};

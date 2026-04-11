@@ -267,6 +267,7 @@ impl TestServer {
                 name: "Test Region".to_string(),
                 location: "localhost".to_string(),
             },
+            p2p: rustunnel_server::config::P2pSection::default(),
         });
 
         // Database.
