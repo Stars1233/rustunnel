@@ -888,4 +888,48 @@ mod tests {
             Err(Error::Tunnel(_))
         ));
     }
+
+    // ── NAT classification ───────────────────────────────────────────────
+
+    #[test]
+    fn classify_cone_cone_is_direct() {
+        let (strategy, attempt) = classify_nat_pair(Some("cone"), Some("cone"));
+        assert_eq!(strategy, "direct_exchange");
+        assert!(attempt);
+    }
+
+    #[test]
+    fn classify_open_cone_is_direct() {
+        let (strategy, attempt) = classify_nat_pair(Some("open"), Some("cone"));
+        assert_eq!(strategy, "direct_exchange");
+        assert!(attempt);
+    }
+
+    #[test]
+    fn classify_cone_symmetric_is_port_prediction() {
+        let (strategy, attempt) = classify_nat_pair(Some("cone"), Some("symmetric"));
+        assert_eq!(strategy, "port_prediction");
+        assert!(attempt);
+    }
+
+    #[test]
+    fn classify_symmetric_symmetric_is_relay() {
+        let (strategy, attempt) = classify_nat_pair(Some("symmetric"), Some("symmetric"));
+        assert_eq!(strategy, "relay");
+        assert!(!attempt);
+    }
+
+    #[test]
+    fn classify_unknown_is_relay() {
+        let (strategy, attempt) = classify_nat_pair(Some("unknown"), Some("cone"));
+        assert_eq!(strategy, "relay");
+        assert!(!attempt);
+    }
+
+    #[test]
+    fn classify_none_is_relay() {
+        let (strategy, attempt) = classify_nat_pair(None, None);
+        assert_eq!(strategy, "relay");
+        assert!(!attempt);
+    }
 }

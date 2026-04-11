@@ -222,6 +222,12 @@ struct TunnelSummary {
     client_addr: String,
     /// Region ID of the server hosting this tunnel (e.g. "eu", "us").
     region_id: String,
+    /// NAT type reported by the client (P2P tunnels only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nat_type: Option<String>,
+    /// Public mapped addresses from STUN probing (P2P tunnels only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mapped_addrs: Option<Vec<String>>,
 }
 
 /// Convert an `Instant` recorded at tunnel creation into an ISO-8601 UTC string.
@@ -264,6 +270,8 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
         });
     }
 
@@ -284,6 +292,8 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
         });
     }
 
@@ -304,6 +314,8 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
         });
     }
 
@@ -325,6 +337,8 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: publisher.nat_type.clone(),
+            mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
         });
     }
 
@@ -377,6 +391,8 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
             })
             .into_response();
         }
@@ -401,6 +417,8 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
             })
             .into_response();
         }
@@ -425,6 +443,8 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
             })
             .into_response();
         }
@@ -450,6 +470,8 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: publisher.nat_type.clone(),
+                mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
             })
             .into_response();
         }
@@ -1251,6 +1273,8 @@ struct P2pPeerInfo {
     request_count: u64,
     bytes_proxied: u64,
     connected_since: String,
+    nat_type: Option<String>,
+    mapped_addrs: Option<Vec<String>>,
 }
 
 async fn tunnel_p2p_peers(
@@ -1273,6 +1297,8 @@ async fn tunnel_p2p_peers(
                 publisher_session_id: info.session_id.to_string(),
                 request_count: info.request_count.load(Ordering::Relaxed),
                 bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+                nat_type: publisher.nat_type.clone(),
+                mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
                 connected_since: instant_to_iso(info.created_at),
             })
             .into_response();
