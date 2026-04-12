@@ -114,6 +114,15 @@ rustunnel http 3000 --subdomain myapp
 
 # TCP tunnel — e.g. expose a local database
 rustunnel tcp 5432
+
+# UDP tunnel — e.g. expose a game server
+rustunnel udp 27015
+
+# P2P tunnel — expose a service to another rustunnel client
+rustunnel p2p 27015 --name my-game --secret "shared-secret"
+
+# P2P tunnel — connect to a peer's service
+rustunnel p2p 8000 --target my-game --secret "shared-secret"
 ```
 
 The client prints the public URL as soon as the tunnel is established:

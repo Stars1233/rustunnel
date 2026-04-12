@@ -27,7 +27,7 @@ use rustunnel_server::control::server::run_control_plane;
 use rustunnel_server::core::{ControlMessage, TunnelCore};
 use rustunnel_server::dashboard::run_dashboard;
 use rustunnel_server::db;
-use rustunnel_server::edge::{run_http_edge, run_tcp_edge, HttpEdgeConfig};
+use rustunnel_server::edge::{run_http_edge, run_tcp_edge, run_udp_edge, HttpEdgeConfig};
 use rustunnel_server::error::Result;
 use rustunnel_server::tls::CertManager;
 
@@ -123,6 +123,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
 
     let core = Arc::new(TunnelCore::new(
         config.limits.tcp_port_range,
+        config.limits.udp_port_range,
         config.limits.max_tunnels_per_session,
         config.limits.max_connections_per_tunnel,
         config.limits.ip_rate_limit_rps,
@@ -216,6 +217,15 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         })
     };
 
+    // ── task c2: UDP edge proxy ──────────────────────────────────────────────
+
+    let h_udp = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            run_udp_edge(core).await;
+        })
+    };
+
     // ── task d: dashboard API server ──────────────────────────────────────────
 
     let h_dashboard = {
@@ -277,6 +287,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         h_control.abort_handle(),
         h_http.abort_handle(),
         h_tcp.abort_handle(),
+        h_udp.abort_handle(),
         h_dashboard.abort_handle(),
         h_metrics.abort_handle(),
     ];
@@ -286,6 +297,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         let _ = h_control.await;
         let _ = h_http.await;
         let _ = h_tcp.await;
+        let _ = h_udp.await;
         let _ = h_dashboard.await;
         let _ = h_metrics.await;
     })
@@ -322,6 +334,46 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
     let sessions = core.sessions.len();
     let http_tunnels = core.http_routes.len();
     let tcp_tunnels = core.tcp_routes.len();
+    let udp_tunnels = core.udp_routes.len();
+    let p2p_tunnels = core.p2p_tunnels.len();
+
+    // Compute aggregate bytes and request counts across all tunnel types.
+    let mut total_bytes: u64 = 0;
+    let mut total_requests: u64 = 0;
+    for entry in core.http_routes.iter() {
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+    }
+    for entry in core.tcp_routes.iter() {
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+    }
+    for entry in core.udp_routes.iter() {
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+    }
+    for entry in core.p2p_tunnels.iter() {
+        total_bytes += entry
+            .tunnel_info
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .tunnel_info
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+    }
 
     let body = format!(
         "# HELP rustunnel_active_sessions Number of active client sessions\n\
@@ -332,7 +384,19 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
          rustunnel_active_tunnels_http {http_tunnels}\n\
          # HELP rustunnel_active_tunnels_tcp Number of active TCP tunnels\n\
          # TYPE rustunnel_active_tunnels_tcp gauge\n\
-         rustunnel_active_tunnels_tcp {tcp_tunnels}\n"
+         rustunnel_active_tunnels_tcp {tcp_tunnels}\n\
+         # HELP rustunnel_active_tunnels_udp Number of active UDP tunnels\n\
+         # TYPE rustunnel_active_tunnels_udp gauge\n\
+         rustunnel_active_tunnels_udp {udp_tunnels}\n\
+         # HELP rustunnel_active_tunnels_p2p Number of active P2P tunnels\n\
+         # TYPE rustunnel_active_tunnels_p2p gauge\n\
+         rustunnel_active_tunnels_p2p {p2p_tunnels}\n\
+         # HELP rustunnel_bytes_proxied_total Total bytes proxied across all tunnels\n\
+         # TYPE rustunnel_bytes_proxied_total counter\n\
+         rustunnel_bytes_proxied_total {total_bytes}\n\
+         # HELP rustunnel_requests_total Total requests/connections across all tunnels\n\
+         # TYPE rustunnel_requests_total counter\n\
+         rustunnel_requests_total {total_requests}\n"
     );
 
     Response::builder()

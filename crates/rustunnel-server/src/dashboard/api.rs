@@ -12,6 +12,8 @@
 //! | GET    | /api/tunnels                                   | All active tunnels                 |
 //! | GET    | /api/tunnels/:id                               | Single tunnel info                 |
 //! | GET    | /api/tunnels/:id/requests                      | Recent captured requests           |
+//! | GET    | /api/tunnels/:id/udp-sessions                  | UDP tunnel session info            |
+//! | GET    | /api/tunnels/:id/p2p-peers                     | P2P tunnel peer info               |
 //! | POST   | /api/tunnels/:id/replay/:request_id            | Replay a captured request          |
 //! | GET    | /api/tokens                                    | List tokens (hash masked)          |
 //! | POST   | /api/tokens                                    | Create a new token                 |
@@ -72,6 +74,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tokens", get(list_tokens).post(create_token))
         .route("/api/tokens/:id", delete(delete_token))
         .route("/api/history", get(tunnel_history))
+        .route("/api/tunnels/:id/udp-sessions", get(tunnel_udp_sessions))
+        .route("/api/tunnels/:id/p2p-peers", get(tunnel_p2p_peers))
         // admin-only
         .route("/api/admin/tokens/:id", patch(admin_patch_token))
         .route("/api/admin/users", get(admin_list_users))
@@ -218,6 +222,12 @@ struct TunnelSummary {
     client_addr: String,
     /// Region ID of the server hosting this tunnel (e.g. "eu", "us").
     region_id: String,
+    /// NAT type reported by the client (P2P tunnels only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nat_type: Option<String>,
+    /// Public mapped addresses from STUN probing (P2P tunnels only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mapped_addrs: Option<Vec<String>>,
 }
 
 /// Convert an `Instant` recorded at tunnel creation into an ISO-8601 UTC string.
@@ -260,6 +270,8 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
         });
     }
 
@@ -280,6 +292,57 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             request_count: info.request_count.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
+        });
+    }
+
+    for entry in state.core.udp_routes.iter() {
+        let info = entry.value();
+        let client_addr = state
+            .core
+            .sessions
+            .get(&info.session_id)
+            .map(|s| s.client_addr.to_string())
+            .unwrap_or_default();
+        tunnels.push(TunnelSummary {
+            tunnel_id: info.tunnel_id.to_string(),
+            protocol: "udp".into(),
+            label: entry.key().to_string(),
+            public_url: format!("udp://:{}", entry.key()),
+            connected_since: instant_to_iso(info.created_at),
+            request_count: info.request_count.load(Ordering::Relaxed),
+            client_addr,
+            region_id: state.region.id.clone(),
+            nat_type: None,
+            mapped_addrs: None,
+        });
+    }
+
+    for entry in state.core.p2p_tunnels.iter() {
+        let publisher = entry.value();
+        let info = &publisher.tunnel_info;
+        let client_addr = state
+            .core
+            .sessions
+            .get(&info.session_id)
+            .map(|s| s.client_addr.to_string())
+            .unwrap_or_default();
+        tunnels.push(TunnelSummary {
+            tunnel_id: info.tunnel_id.to_string(),
+            protocol: "p2p".into(),
+            label: publisher.name.clone(),
+            public_url: format!("p2p://{}", publisher.name),
+            connected_since: instant_to_iso(info.created_at),
+            request_count: info.request_count.load(Ordering::Relaxed),
+            client_addr,
+            region_id: state.region.id.clone(),
+            nat_type: publisher.nat_type.clone(),
+            mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                None
+            } else {
+                Some(publisher.mapped_addrs.clone())
+            },
         });
     }
 
@@ -332,6 +395,8 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
             })
             .into_response();
         }
@@ -356,6 +421,65 @@ async fn get_tunnel(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
+            })
+            .into_response();
+        }
+    }
+
+    // Then UDP routes.
+    for entry in state.core.udp_routes.iter() {
+        if entry.value().tunnel_id.to_string() == id {
+            let info = entry.value();
+            let client_addr = state
+                .core
+                .sessions
+                .get(&info.session_id)
+                .map(|s| s.client_addr.to_string())
+                .unwrap_or_default();
+            return Json(TunnelSummary {
+                tunnel_id: info.tunnel_id.to_string(),
+                protocol: "udp".into(),
+                label: entry.key().to_string(),
+                public_url: format!("udp://:{}", entry.key()),
+                connected_since: instant_to_iso(info.created_at),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                client_addr,
+                region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
+            })
+            .into_response();
+        }
+    }
+
+    // Then P2P tunnels.
+    for entry in state.core.p2p_tunnels.iter() {
+        let publisher = entry.value();
+        if publisher.tunnel_info.tunnel_id.to_string() == id {
+            let info = &publisher.tunnel_info;
+            let client_addr = state
+                .core
+                .sessions
+                .get(&info.session_id)
+                .map(|s| s.client_addr.to_string())
+                .unwrap_or_default();
+            return Json(TunnelSummary {
+                tunnel_id: info.tunnel_id.to_string(),
+                protocol: "p2p".into(),
+                label: publisher.name.clone(),
+                public_url: format!("p2p://{}", publisher.name),
+                connected_since: instant_to_iso(info.created_at),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                client_addr,
+                region_id: state.region.id.clone(),
+                nat_type: publisher.nat_type.clone(),
+                mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                    None
+                } else {
+                    Some(publisher.mapped_addrs.clone())
+                },
             })
             .into_response();
         }
@@ -1105,4 +1229,93 @@ async fn tunnel_history(
         )
             .into_response(),
     }
+}
+
+// ── UDP sessions ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct UdpSessionInfo {
+    tunnel_id: String,
+    port: u16,
+    protocol: String,
+    request_count: u64,
+    bytes_proxied: u64,
+    connected_since: String,
+}
+
+async fn tunnel_udp_sessions(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&headers, &state).await {
+        return e.into_response();
+    }
+
+    // Find the UDP tunnel by ID.
+    for entry in state.core.udp_routes.iter() {
+        let info = entry.value();
+        if info.tunnel_id.to_string() == id {
+            return Json(UdpSessionInfo {
+                tunnel_id: info.tunnel_id.to_string(),
+                port: *entry.key(),
+                protocol: "udp".into(),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+                connected_since: instant_to_iso(info.created_at),
+            })
+            .into_response();
+        }
+    }
+
+    not_found("UDP tunnel not found").into_response()
+}
+
+// ── P2P peers ────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct P2pPeerInfo {
+    tunnel_id: String,
+    tunnel_name: String,
+    publisher_session_id: String,
+    request_count: u64,
+    bytes_proxied: u64,
+    connected_since: String,
+    nat_type: Option<String>,
+    mapped_addrs: Option<Vec<String>>,
+}
+
+async fn tunnel_p2p_peers(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&headers, &state).await {
+        return e.into_response();
+    }
+
+    // Find the P2P tunnel by ID.
+    for entry in state.core.p2p_tunnels.iter() {
+        let publisher = entry.value();
+        let info = &publisher.tunnel_info;
+        if info.tunnel_id.to_string() == id {
+            return Json(P2pPeerInfo {
+                tunnel_id: info.tunnel_id.to_string(),
+                tunnel_name: publisher.name.clone(),
+                publisher_session_id: info.session_id.to_string(),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+                nat_type: publisher.nat_type.clone(),
+                mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                    None
+                } else {
+                    Some(publisher.mapped_addrs.clone())
+                },
+                connected_since: instant_to_iso(info.created_at),
+            })
+            .into_response();
+        }
+    }
+
+    not_found("P2P tunnel not found").into_response()
 }

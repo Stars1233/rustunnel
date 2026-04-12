@@ -17,6 +17,10 @@ export interface Tunnel {
   client_addr: string;
   /** Region ID of the server hosting this tunnel (e.g. "eu", "us"). */
   region_id: string;
+  /** NAT type reported by the client (P2P tunnels only). */
+  nat_type?: string;
+  /** Public mapped addresses from STUN probing (P2P tunnels only). */
+  mapped_addrs?: string[];
 }
 
 export interface CapturedRequest {

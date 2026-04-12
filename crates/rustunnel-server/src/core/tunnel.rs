@@ -20,6 +20,14 @@ pub enum TcpTunnelEvent {
     Unregistered { port: u16 },
 }
 
+/// Broadcast by `TunnelCore` whenever a UDP tunnel is added or removed.
+/// The UDP edge layer subscribes to this to manage per-port listeners.
+#[derive(Debug, Clone)]
+pub enum UdpTunnelEvent {
+    Registered { tunnel_id: Uuid, port: u16 },
+    Unregistered { port: u16 },
+}
+
 // ── control-plane message ─────────────────────────────────────────────────────
 
 /// Messages the router sends down a session's control channel.

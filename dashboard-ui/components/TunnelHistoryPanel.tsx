@@ -225,6 +225,8 @@ export function HistoryTable({ api, enabled, tokenId, compact }: HistoryTablePro
       <Tab label="All" active={protocol === 'all'} onClick={() => changeProtocol('all')} />
       <Tab label="HTTP" active={protocol === 'http'} onClick={() => changeProtocol('http')} />
       <Tab label="TCP" active={protocol === 'tcp'} onClick={() => changeProtocol('tcp')} />
+      <Tab label="UDP" active={protocol === 'udp'} onClick={() => changeProtocol('udp')} />
+      <Tab label="P2P" active={protocol === 'p2p'} onClick={() => changeProtocol('p2p')} />
       <span style={{ width: 1, height: 14, background: 'var(--border)', display: 'inline-block', margin: '0 4px' }} />
       {/* Status tabs */}
       <Tab label="Active" active={activeFilter === 'active'} onClick={() => changeActiveFilter('active')} />

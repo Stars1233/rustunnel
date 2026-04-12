@@ -480,6 +480,8 @@ where
             protocol,
             subdomain,
             local_addr: _,
+            p2p_secret_hash,
+            p2p_name,
         } => {
             tracing::debug!(%session_id, %request_id, ?protocol, "register tunnel");
 
@@ -612,6 +614,7 @@ where
                                     tunnel_id,
                                     public_url,
                                     assigned_port: None,
+                                    p2p_tunnel_name: None,
                                 },
                             )
                             .await?;
@@ -628,6 +631,52 @@ where
                         }
                     }
                 }
+                TunnelProtocol::Udp => match core.register_udp_tunnel(&session_id) {
+                    Ok((tunnel_id, port)) => {
+                        let public_url = format!("udp://{}:{port}", config.server.domain);
+                        let port_str = port.to_string();
+                        let _ = audit_tx.try_send(AuditEvent::TunnelRegistered {
+                            session_id: session_id.to_string(),
+                            tunnel_id: tunnel_id.to_string(),
+                            protocol: "udp".into(),
+                            label: port_str.clone(),
+                        });
+                        let _ = db::log_tunnel_registered(
+                            &db.pg,
+                            db::TunnelRegistration {
+                                tunnel_id: &tunnel_id.to_string(),
+                                protocol: "udp",
+                                label: &port_str,
+                                session_id: &session_id.to_string(),
+                                token_id: db_token_id.as_deref(),
+                                region_id: &config.region.id,
+                                user_id: token_user_id,
+                            },
+                        )
+                        .await;
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelRegistered {
+                                request_id,
+                                tunnel_id,
+                                public_url,
+                                assigned_port: Some(port),
+                                p2p_tunnel_name: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelError {
+                                request_id,
+                                message: e.to_string(),
+                            },
+                        )
+                        .await?;
+                    }
+                },
                 TunnelProtocol::Tcp => match core.register_tcp_tunnel(&session_id) {
                     Ok((tunnel_id, port)) => {
                         let public_url = format!("tcp://{}:{port}", config.server.domain);
@@ -658,6 +707,7 @@ where
                                 tunnel_id,
                                 public_url,
                                 assigned_port: Some(port),
+                                p2p_tunnel_name: None,
                             },
                         )
                         .await?;
@@ -673,6 +723,93 @@ where
                         .await?;
                     }
                 },
+                TunnelProtocol::P2p => {
+                    if !config.p2p.enabled {
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelError {
+                                request_id,
+                                message: "P2P tunnels are not enabled on this server".into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    let p2p_name = match p2p_name {
+                        Some(name) => name,
+                        None => {
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelError {
+                                    request_id,
+                                    message: "P2P tunnel requires a name (p2p_name)".into(),
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                    let secret_hash = match p2p_secret_hash {
+                        Some(h) => h,
+                        None => {
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelError {
+                                    request_id,
+                                    message: "P2P tunnel requires a secret hash (p2p_secret_hash)"
+                                        .into(),
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                    match core.register_p2p_tunnel(&session_id, p2p_name.clone(), secret_hash) {
+                        Ok((tunnel_id, name)) => {
+                            let public_url = format!("p2p://{name}");
+                            let _ = audit_tx.try_send(AuditEvent::TunnelRegistered {
+                                session_id: session_id.to_string(),
+                                tunnel_id: tunnel_id.to_string(),
+                                protocol: "p2p".into(),
+                                label: name.clone(),
+                            });
+                            let _ = db::log_tunnel_registered(
+                                &db.pg,
+                                db::TunnelRegistration {
+                                    tunnel_id: &tunnel_id.to_string(),
+                                    protocol: "p2p",
+                                    label: &name,
+                                    session_id: &session_id.to_string(),
+                                    token_id: db_token_id.as_deref(),
+                                    region_id: &config.region.id,
+                                    user_id: token_user_id,
+                                },
+                            )
+                            .await;
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelRegistered {
+                                    request_id,
+                                    tunnel_id,
+                                    public_url,
+                                    assigned_port: None,
+                                    p2p_tunnel_name: Some(name),
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            send_frame(
+                                ws,
+                                &ControlFrame::TunnelError {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                }
             }
         }
 
@@ -695,6 +832,221 @@ where
             core.remove_tunnel(&tunnel_id);
         }
 
+        ControlFrame::P2pConnect {
+            request_id,
+            target_tunnel_name,
+            secret_hash,
+        } => {
+            tracing::debug!(%session_id, %target_tunnel_name, "P2P connect request");
+
+            if !config.p2p.enabled {
+                send_frame(
+                    ws,
+                    &ControlFrame::P2pError {
+                        request_id,
+                        message: "P2P tunnels are not enabled on this server".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            // Look up the publisher.
+            let resolved = core.resolve_p2p(&target_tunnel_name);
+            match resolved {
+                None => {
+                    send_frame(
+                        ws,
+                        &ControlFrame::P2pError {
+                            request_id,
+                            message: format!("P2P tunnel '{target_tunnel_name}' not found"),
+                        },
+                    )
+                    .await?;
+                }
+                Some((publisher, publisher_tx)) => {
+                    // Verify the shared secret.
+                    if publisher.secret_hash != secret_hash {
+                        send_frame(
+                            ws,
+                            &ControlFrame::P2pError {
+                                request_id,
+                                message: "invalid P2P secret".into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    // Classify NAT pair and decide on direct vs relay.
+                    let pub_nat = publisher.nat_type.as_deref();
+                    // Subscriber doesn't probe STUN before P2pConnect, so we
+                    // assume "cone" for the subscriber side. If the publisher
+                    // is cone/open, we attempt direct. The relay always runs
+                    // in parallel as fallback, so a wrong guess only costs
+                    // the punch timeout (5s) before falling back.
+                    let sub_nat_assumed = if pub_nat.is_some() {
+                        Some("cone")
+                    } else {
+                        None
+                    };
+                    let (strategy, attempt_direct) =
+                        crate::core::classify_nat_pair(pub_nat, sub_nat_assumed);
+
+                    // Generate a conn_id for this P2P connection.
+                    let conn_id = Uuid::new_v4();
+                    tracing::info!(
+                        %conn_id, %target_tunnel_name,
+                        publisher_session = %publisher.tunnel_info.session_id,
+                        subscriber_session = %session_id,
+                        strategy,
+                        attempt_direct,
+                        "P2P connection"
+                    );
+
+                    // If direct mode is possible, send punch instructions to
+                    // both peers. They attempt hole punching in parallel with
+                    // the relay setup. If punching succeeds, the clients
+                    // upgrade to QUIC and stop using the relay.
+                    if attempt_direct && !publisher.mapped_addrs.is_empty() {
+                        // Send publisher's mapped addrs to subscriber.
+                        send_frame(
+                            ws,
+                            &ControlFrame::P2pPunchInstructions {
+                                conn_id,
+                                peer_addrs: publisher.mapped_addrs.clone(),
+                                strategy: strategy.to_string(),
+                                punch_timeout_ms: 5000,
+                            },
+                        )
+                        .await?;
+
+                        // Send subscriber info to publisher (via publisher's
+                        // control channel — we don't have subscriber's mapped
+                        // addrs here yet, so this is best-effort).
+                    }
+
+                    // Tell the publisher to open a yamux stream for this conn_id.
+                    // The publisher's session handler will send NewConnection to
+                    // the publisher client, which will open a stream and proxy
+                    // to its local service.
+                    let pub_stream_rx = core.register_pending_conn(conn_id);
+
+                    if publisher_tx
+                        .send(ControlMessage::NewConnection {
+                            conn_id,
+                            client_addr: std::net::SocketAddr::from((
+                                std::net::Ipv4Addr::UNSPECIFIED,
+                                0,
+                            )),
+                            protocol: TunnelProtocol::P2p,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        core.cancel_pending_conn(&conn_id);
+                        send_frame(
+                            ws,
+                            &ControlFrame::P2pError {
+                                request_id,
+                                message: "publisher session is disconnected".into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    // Use two distinct conn_ids: one for the publisher yamux
+                    // stream, one for the subscriber. The server bridges them.
+                    let pub_conn_id = conn_id;
+                    let sub_conn_id = Uuid::new_v4();
+
+                    // Register subscriber pending conn.
+                    let sub_stream_rx = core.register_pending_conn(sub_conn_id);
+
+                    // Tell the subscriber (this session) about the connection.
+                    send_frame(
+                        ws,
+                        &ControlFrame::P2pConnected {
+                            request_id,
+                            conn_id: sub_conn_id,
+                        },
+                    )
+                    .await?;
+
+                    // Trigger a NewConnection on the subscriber's own session
+                    // so that main_loop opens a yamux stream for the subscriber
+                    // side of the relay. The subscriber client will receive
+                    // NewConnection and proxy to its local port.
+                    if let Some(sub_session) = core.sessions.get(&session_id) {
+                        let _ = sub_session
+                            .control_tx
+                            .try_send(ControlMessage::NewConnection {
+                                conn_id: sub_conn_id,
+                                client_addr: std::net::SocketAddr::from((
+                                    std::net::Ipv4Addr::UNSPECIFIED,
+                                    0,
+                                )),
+                                protocol: TunnelProtocol::P2p,
+                            });
+                    }
+
+                    // Spawn a task that waits for both streams and bridges them.
+                    let core_relay = Arc::clone(core);
+                    let pub_bytes = Arc::clone(&publisher.tunnel_info.bytes_proxied);
+                    tokio::spawn(async move {
+                        let pub_stream = match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            pub_stream_rx,
+                        )
+                        .await
+                        {
+                            Ok(Ok(s)) => s,
+                            _ => {
+                                tracing::warn!(%pub_conn_id, "P2P relay: publisher stream timeout");
+                                core_relay.cancel_pending_conn(&sub_conn_id);
+                                return;
+                            }
+                        };
+                        let sub_stream = match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            sub_stream_rx,
+                        )
+                        .await
+                        {
+                            Ok(Ok(s)) => s,
+                            _ => {
+                                tracing::warn!(%sub_conn_id, "P2P relay: subscriber stream timeout");
+                                return;
+                            }
+                        };
+
+                        // Bridge the two yamux streams bidirectionally.
+                        let mut pub_compat =
+                            tokio_util::compat::FuturesAsyncReadCompatExt::compat(pub_stream);
+                        let mut sub_compat =
+                            tokio_util::compat::FuturesAsyncReadCompatExt::compat(sub_stream);
+
+                        match tokio::io::copy_bidirectional(&mut pub_compat, &mut sub_compat).await
+                        {
+                            Ok((up, down)) => {
+                                tracing::info!(
+                                    %pub_conn_id, %sub_conn_id,
+                                    bytes_up = up, bytes_down = down,
+                                    "P2P relay done"
+                                );
+                                pub_bytes
+                                    .fetch_add(up + down, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                tracing::debug!(%pub_conn_id, "P2P relay error: {e}");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
         ControlFrame::Ping { timestamp } => {
             send_frame(ws, &ControlFrame::Pong { timestamp }).await?;
         }
@@ -702,6 +1054,40 @@ where
         ControlFrame::Pong { timestamp } => {
             tracing::trace!(%session_id, timestamp, "pong");
             let _ = pong_in_tx.try_send(timestamp);
+        }
+
+        ControlFrame::P2pNatInfo {
+            tunnel_id,
+            nat_type,
+            mapped_addrs,
+            local_addrs: _,
+        } => {
+            tracing::debug!(%session_id, %tunnel_id, %nat_type, "P2P NAT info received");
+            core.update_p2p_nat_info(&tunnel_id, nat_type, mapped_addrs);
+        }
+
+        ControlFrame::P2pPunchResult {
+            conn_id,
+            success,
+            direct_addr,
+        } => {
+            tracing::info!(%session_id, %conn_id, success, ?direct_addr, "P2P punch result");
+            // Punch results are logged for analytics. Direct connections are
+            // already established client-side; no server action needed.
+        }
+
+        ControlFrame::P2pMetrics {
+            tunnel_id,
+            bytes_sent,
+            bytes_received,
+        } => {
+            tracing::debug!(
+                %session_id, %tunnel_id,
+                bytes_sent, bytes_received,
+                "P2P client-reported metrics"
+            );
+            // Store for dashboard visibility. These are informational only —
+            // not used for billing (direct P2P traffic can't be verified).
         }
 
         other => {

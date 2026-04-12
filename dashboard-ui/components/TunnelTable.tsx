@@ -1,8 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import type { Tunnel } from '@/lib/types';
 import { relativeTime, copyToClipboard } from '@/lib/api';
 import { Badge } from './ui/Badge';
+
+const PROTOCOLS = ['all', 'http', 'tcp', 'udp', 'p2p'] as const;
 
 interface TunnelTableProps {
   tunnels: Tunnel[];
@@ -12,6 +15,12 @@ interface TunnelTableProps {
 }
 
 export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTableProps) {
+  const [protocolFilter, setProtocolFilter] = useState<string>('all');
+
+  const filtered = protocolFilter === 'all'
+    ? tunnels
+    : tunnels.filter((t) => t.protocol === protocolFilter);
+
   if (tunnels.length === 0) {
     return (
       <div
@@ -30,6 +39,29 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
 
   return (
     <div style={{ overflowX: 'auto' }}>
+      {/* Protocol filter */}
+      <div style={{ padding: '8px 14px', display: 'flex', gap: 6, alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginRight: 4 }}>Filter:</span>
+        {PROTOCOLS.map((p) => (
+          <button
+            key={p}
+            onClick={() => setProtocolFilter(p)}
+            style={{
+              padding: '2px 8px',
+              fontSize: 11,
+              borderRadius: 4,
+              border: '1px solid var(--border)',
+              background: protocolFilter === p ? 'var(--accent-dim)' : 'transparent',
+              color: protocolFilter === p ? 'var(--accent)' : 'var(--muted)',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+              fontWeight: protocolFilter === p ? 600 : 400,
+            }}
+          >
+            {p}
+          </button>
+        ))}
+      </div>
       <table
         style={{
           width: '100%',
@@ -59,7 +91,7 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
           </tr>
         </thead>
         <tbody>
-          {tunnels.map((t) => {
+          {filtered.map((t) => {
             const isSelected = selected?.tunnel_id === t.tunnel_id;
             return (
               <tr
@@ -78,11 +110,25 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
                   if (!isSelected) e.currentTarget.style.background = 'transparent';
                 }}
               >
-                <td style={{ padding: '10px 14px' }}>
+                <td style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <Badge
                     label={t.protocol.toUpperCase()}
                     color={t.protocol === 'http' ? 'var(--accent)' : 'var(--purple)'}
                   />
+                  {t.protocol === 'p2p' && t.nat_type && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted)',
+                        background: 'var(--surface2)',
+                        padding: '1px 4px',
+                        borderRadius: 3,
+                      }}
+                      title={t.mapped_addrs?.join(', ') || ''}
+                    >
+                      {t.nat_type}
+                    </span>
+                  )}
                 </td>
                 <td style={{ padding: '10px 14px', color: 'var(--accent)', maxWidth: 260 }}>
                   <span

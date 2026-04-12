@@ -14,6 +14,52 @@ pub struct ServerConfig {
     /// Region identity for this server instance.
     #[serde(default)]
     pub region: RegionSection,
+    /// P2P direct connection settings.
+    #[serde(default)]
+    pub p2p: P2pSection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct P2pSection {
+    /// Master switch for P2P tunnels. When false, P2P registration and
+    /// P2pConnect requests are rejected with a clear error. Direct mode is
+    /// gated by `direct_enabled` below; this flag gates P2P entirely
+    /// (relay + direct). Defaults to false for safe rollout.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enable P2P direct mode (NAT hole punching). When false, all P2P
+    /// connections use server relay only. Only takes effect when `enabled`
+    /// is also true.
+    #[serde(default)]
+    pub direct_enabled: bool,
+    /// STUN servers for NAT type detection (client-side configuration hint).
+    #[serde(default = "default_stun_servers")]
+    pub stun_servers: Vec<String>,
+    /// Hole punch timeout in milliseconds.
+    #[serde(default = "default_punch_timeout_ms")]
+    pub punch_timeout_ms: u32,
+}
+
+fn default_stun_servers() -> Vec<String> {
+    vec![
+        "stun.l.google.com:19302".into(),
+        "stun1.l.google.com:19302".into(),
+    ]
+}
+
+fn default_punch_timeout_ms() -> u32 {
+    5000
+}
+
+impl Default for P2pSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            direct_enabled: false,
+            stun_servers: default_stun_servers(),
+            punch_timeout_ms: default_punch_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +215,14 @@ pub struct LimitsSection {
     pub request_body_max_bytes: usize,
     /// Inclusive [low, high] port range reserved for TCP tunnels
     pub tcp_port_range: [u16; 2],
+    /// Inclusive [low, high] port range reserved for UDP tunnels.
+    /// Set to [0, 0] to disable UDP tunnels.
+    #[serde(default = "default_udp_port_range")]
+    pub udp_port_range: [u16; 2],
+}
+
+fn default_udp_port_range() -> [u16; 2] {
+    [0, 0]
 }
 
 fn default_ip_rate_limit_rps() -> u32 {
@@ -236,12 +290,14 @@ impl Default for ServerConfig {
                 ip_rate_limit_rps: 1000,
                 request_body_max_bytes: 10 * 1024 * 1024,
                 tcp_port_range: [20000, 20099],
+                udp_port_range: [0, 0],
             },
             region: RegionSection {
                 id: "test".to_string(),
                 name: "Test Region".to_string(),
                 location: "localhost".to_string(),
             },
+            p2p: P2pSection::default(),
         }
     }
 }

@@ -50,6 +50,7 @@ arc-swap = "1"
 x509-parser = "0.16"
 tempfile = "3"
 socket2 = { version = "0.5", features = ["all"] }
+quinn = "0.11"
 sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "tracing", "logs"] }
 sentry-tracing = "0.47"
 rustunnel-protocol = { path = "crates/rustunnel-protocol" }

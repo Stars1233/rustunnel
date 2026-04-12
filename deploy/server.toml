@@ -129,3 +129,28 @@ request_body_max_bytes = 10485760
 # Each active TCP tunnel consumes one port from this range.
 # Make sure these ports are open in your firewall (see README.md).
 tcp_port_range = [20000, 20099]
+
+# Inclusive [low, high] port range reserved for UDP tunnels.
+# Each active UDP tunnel consumes one port from this range.
+# Set to [0, 0] to disable UDP tunnels.
+udp_port_range = [20100, 20199]
+
+# ── P2P direct connections ────────────────────────────────────────────────────
+
+[p2p]
+# Master switch for P2P tunnels (both relay and direct). When false,
+# the server rejects P2P registration and P2pConnect with a clear error.
+# Set to true once you're ready to accept P2P traffic in this region.
+enabled = true
+
+# Enable P2P direct mode (NAT hole punching). When false, all P2P
+# connections use server relay only. Only takes effect when `enabled`
+# is also true. Set to true once relay mode is proven stable.
+direct_enabled = false
+
+# STUN servers used by clients for NAT type detection.
+stun_servers = ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
+
+# Hole punch timeout in milliseconds. If probes don't succeed within
+# this window, the connection falls back to relay.
+punch_timeout_ms = 5000
