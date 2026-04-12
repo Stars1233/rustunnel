@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "NEXT_PUBLIC_API_URL=http://localhost:8443 next dev",
+    "dev": "NEXT_PUBLIC_API_URL=http://localhost:4041 next dev",
     "build": "next build",
     "type-check": "tsc --noEmit"
   },

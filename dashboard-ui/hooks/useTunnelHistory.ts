@@ -8,7 +8,7 @@ const PAGE_SIZE = 25;
 export type SortBy = 'started' | 'duration' | 'protocol';
 export type SortDir = 'asc' | 'desc';
 export type ActiveFilter = 'all' | 'active' | 'closed';
-export type ProtocolFilter = 'all' | 'http' | 'tcp';
+export type ProtocolFilter = 'all' | 'http' | 'tcp' | 'udp' | 'p2p';
 
 interface Options {
   /** Lock the hook to a specific token ID — used for token drill-down. */
