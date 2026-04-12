@@ -138,9 +138,14 @@ udp_port_range = [20100, 20199]
 # ── P2P direct connections ────────────────────────────────────────────────────
 
 [p2p]
+# Master switch for P2P tunnels (both relay and direct). When false,
+# the server rejects P2P registration and P2pConnect with a clear error.
+# Set to true once you're ready to accept P2P traffic in this region.
+enabled = true
+
 # Enable P2P direct mode (NAT hole punching). When false, all P2P
-# connections use server relay only. Set to true once relay mode is
-# proven stable in production.
+# connections use server relay only. Only takes effect when `enabled`
+# is also true. Set to true once relay mode is proven stable.
 direct_enabled = false
 
 # STUN servers used by clients for NAT type detection.

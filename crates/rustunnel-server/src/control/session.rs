@@ -724,6 +724,17 @@ where
                     }
                 },
                 TunnelProtocol::P2p => {
+                    if !config.p2p.enabled {
+                        send_frame(
+                            ws,
+                            &ControlFrame::TunnelError {
+                                request_id,
+                                message: "P2P tunnels are not enabled on this server".into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     let p2p_name = match p2p_name {
                         Some(name) => name,
                         None => {
@@ -827,6 +838,18 @@ where
             secret_hash,
         } => {
             tracing::debug!(%session_id, %target_tunnel_name, "P2P connect request");
+
+            if !config.p2p.enabled {
+                send_frame(
+                    ws,
+                    &ControlFrame::P2pError {
+                        request_id,
+                        message: "P2P tunnels are not enabled on this server".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
 
             // Look up the publisher.
             let resolved = core.resolve_p2p(&target_tunnel_name);

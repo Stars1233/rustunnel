@@ -21,8 +21,15 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct P2pSection {
+    /// Master switch for P2P tunnels. When false, P2P registration and
+    /// P2pConnect requests are rejected with a clear error. Direct mode is
+    /// gated by `direct_enabled` below; this flag gates P2P entirely
+    /// (relay + direct). Defaults to false for safe rollout.
+    #[serde(default)]
+    pub enabled: bool,
     /// Enable P2P direct mode (NAT hole punching). When false, all P2P
-    /// connections use server relay only.
+    /// connections use server relay only. Only takes effect when `enabled`
+    /// is also true.
     #[serde(default)]
     pub direct_enabled: bool,
     /// STUN servers for NAT type detection (client-side configuration hint).
@@ -47,6 +54,7 @@ fn default_punch_timeout_ms() -> u32 {
 impl Default for P2pSection {
     fn default() -> Self {
         Self {
+            enabled: false,
             direct_enabled: false,
             stun_servers: default_stun_servers(),
             punch_timeout_ms: default_punch_timeout_ms(),
