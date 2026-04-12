@@ -71,7 +71,6 @@ pub enum ControlFrame {
     },
 
     // ── P2P frames ───────────────────────────────────────────────────────
-
     /// Subscriber requests a P2P connection to a named publisher tunnel.
     P2pConnect {
         request_id: String,
@@ -92,7 +91,6 @@ pub enum ControlFrame {
     },
 
     // ── P2P direct (Phase 3) ─────────────────────────────────────────────
-
     /// Client reports its NAT type and mapped addresses after STUN probing.
     /// Sent by both publisher and subscriber during P2P setup.
     P2pNatInfo {

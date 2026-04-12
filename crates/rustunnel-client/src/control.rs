@@ -308,7 +308,11 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         .await?;
 
         match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT).await? {
-            ControlFrame::TunnelRegistered { public_url, tunnel_id, .. } => {
+            ControlFrame::TunnelRegistered {
+                public_url,
+                tunnel_id,
+                ..
+            } => {
                 info!(%public_url, %tunnel_id, "tunnel registered");
                 // Store tunnel_id on the TunnelDef for later use (P2P NAT info).
                 let mut tdef = tunnel.clone();
@@ -341,8 +345,16 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 "P2P publisher: NAT classification complete"
             );
 
-            let mapped: Vec<String> = stun_result.mapped_addrs.iter().map(|a| a.to_string()).collect();
-            let locals: Vec<String> = stun_result.local_addrs.iter().map(|a| a.to_string()).collect();
+            let mapped: Vec<String> = stun_result
+                .mapped_addrs
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
+            let locals: Vec<String> = stun_result
+                .local_addrs
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
 
             send_frame(
                 &mut ctrl_ws,
@@ -360,23 +372,24 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     // 3c. P2P subscriber: start local TCP listener ────────────────────────
     // The subscriber listens on its local port. Each incoming connection
     // triggers a P2pConnect to the server, establishing a relay on demand.
-    let p2p_sub_info: Option<(String, String, Vec<u8>)> = tunnels.iter().find_map(|t| {
-        match (&t.p2p_target, &t.p2p_secret_hash, &t.p2p_secret) {
-            (Some(target), Some(hash), Some(secret)) => {
-                Some((target.clone(), hash.clone(), secret.as_bytes().to_vec()))
-            }
-            (Some(target), Some(hash), None) => {
-                Some((target.clone(), hash.clone(), Vec::new()))
-            }
-            _ => None,
-        }
-    });
+    let p2p_sub_info: Option<(String, String, Vec<u8>)> =
+        tunnels.iter().find_map(
+            |t| match (&t.p2p_target, &t.p2p_secret_hash, &t.p2p_secret) {
+                (Some(target), Some(hash), Some(secret)) => {
+                    Some((target.clone(), hash.clone(), secret.as_bytes().to_vec()))
+                }
+                (Some(target), Some(hash), None) => {
+                    Some((target.clone(), hash.clone(), Vec::new()))
+                }
+                _ => None,
+            },
+        );
 
     let p2p_accept_rx = if let Some(sub) = tunnels.iter().find(|t| t.p2p_target.is_some()) {
         let addr = format!("{}:{}", sub.local_host, sub.local_port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-            Error::Connection(format!("P2P subscriber: cannot bind {addr}: {e}"))
-        })?;
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| Error::Connection(format!("P2P subscriber: cannot bind {addr}: {e}")))?;
         info!(%addr, "P2P subscriber listening for incoming connections");
         let (tx, rx) = mpsc::channel::<tokio::net::TcpStream>(16);
         tokio::spawn(async move {
@@ -485,9 +498,9 @@ async fn main_loop(
 
     loop {
         // Pick the right P2P accept channel (real or disabled).
-        let p2p_rx = p2p_accept_rx.as_mut().unwrap_or(
-            p2p_disabled_rx.get_or_insert_with(|| mpsc::channel(1).1),
-        );
+        let p2p_rx = p2p_accept_rx
+            .as_mut()
+            .unwrap_or(p2p_disabled_rx.get_or_insert_with(|| mpsc::channel(1).1));
 
         tokio::select! {
             biased;

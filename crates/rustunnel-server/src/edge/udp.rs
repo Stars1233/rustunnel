@@ -62,7 +62,7 @@ struct UdpSession {
 impl UdpSession {
     fn touch(&self) {
         let now = Instant::now().elapsed().as_secs(); // monotonic
-        // We store a relative "seconds since some epoch" — only ordering matters.
+                                                      // We store a relative "seconds since some epoch" — only ordering matters.
         self.last_activity.store(now, Ordering::Relaxed);
     }
 }

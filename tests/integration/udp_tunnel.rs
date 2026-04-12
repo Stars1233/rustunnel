@@ -68,10 +68,7 @@ async fn udp_tunnel_registration() {
     );
 
     // Verify tunnel_id is tracked.
-    assert!(
-        !tunnel_id.is_nil(),
-        "tunnel_id should be a valid UUID"
-    );
+    assert!(!tunnel_id.is_nil(), "tunnel_id should be a valid UUID");
 }
 
 #[tokio::test]
@@ -117,7 +114,11 @@ async fn udp_tunnel_echoes_datagram() {
     .expect("echo timeout")
     .expect("recv echo");
 
-    assert_eq!(&buf[..recv.0], b"hello udp", "echo should return exact bytes");
+    assert_eq!(
+        &buf[..recv.0],
+        b"hello udp",
+        "echo should return exact bytes"
+    );
 }
 
 #[tokio::test]

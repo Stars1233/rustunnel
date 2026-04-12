@@ -341,20 +341,38 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
     let mut total_bytes: u64 = 0;
     let mut total_requests: u64 = 0;
     for entry in core.http_routes.iter() {
-        total_bytes += entry.bytes_proxied.load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry.request_count.load(std::sync::atomic::Ordering::Relaxed);
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
     }
     for entry in core.tcp_routes.iter() {
-        total_bytes += entry.bytes_proxied.load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry.request_count.load(std::sync::atomic::Ordering::Relaxed);
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
     }
     for entry in core.udp_routes.iter() {
-        total_bytes += entry.bytes_proxied.load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry.request_count.load(std::sync::atomic::Ordering::Relaxed);
+        total_bytes += entry
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
     }
     for entry in core.p2p_tunnels.iter() {
-        total_bytes += entry.tunnel_info.bytes_proxied.load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry.tunnel_info.request_count.load(std::sync::atomic::Ordering::Relaxed);
+        total_bytes += entry
+            .tunnel_info
+            .bytes_proxied
+            .load(std::sync::atomic::Ordering::Relaxed);
+        total_requests += entry
+            .tunnel_info
+            .request_count
+            .load(std::sync::atomic::Ordering::Relaxed);
     }
 
     let body = format!(

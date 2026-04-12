@@ -836,9 +836,7 @@ where
                         ws,
                         &ControlFrame::P2pError {
                             request_id,
-                            message: format!(
-                                "P2P tunnel '{target_tunnel_name}' not found"
-                            ),
+                            message: format!("P2P tunnel '{target_tunnel_name}' not found"),
                         },
                     )
                     .await?;
@@ -958,16 +956,16 @@ where
                     // side of the relay. The subscriber client will receive
                     // NewConnection and proxy to its local port.
                     if let Some(sub_session) = core.sessions.get(&session_id) {
-                        let _ = sub_session.control_tx.try_send(
-                            ControlMessage::NewConnection {
+                        let _ = sub_session
+                            .control_tx
+                            .try_send(ControlMessage::NewConnection {
                                 conn_id: sub_conn_id,
                                 client_addr: std::net::SocketAddr::from((
                                     std::net::Ipv4Addr::UNSPECIFIED,
                                     0,
                                 )),
                                 protocol: TunnelProtocol::P2p,
-                            },
-                        );
+                            });
                     }
 
                     // Spawn a task that waits for both streams and bridges them.
@@ -1014,10 +1012,8 @@ where
                                     bytes_up = up, bytes_down = down,
                                     "P2P relay done"
                                 );
-                                pub_bytes.fetch_add(
-                                    up + down,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                                pub_bytes
+                                    .fetch_add(up + down, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(e) => {
                                 tracing::debug!(%pub_conn_id, "P2P relay error: {e}");

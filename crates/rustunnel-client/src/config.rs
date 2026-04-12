@@ -83,12 +83,7 @@ impl TunnelDef {
     }
 
     /// Build a P2P publisher `TunnelDef`.
-    pub fn p2p_publisher(
-        port: u16,
-        local_host: &str,
-        name: String,
-        secret: String,
-    ) -> Self {
+    pub fn p2p_publisher(port: u16, local_host: &str, name: String, secret: String) -> Self {
         use sha2::{Digest, Sha256};
         let hash = hex::encode(Sha256::digest(secret.as_bytes()));
         Self {
@@ -105,12 +100,7 @@ impl TunnelDef {
     }
 
     /// Build a P2P subscriber `TunnelDef`.
-    pub fn p2p_subscriber(
-        port: u16,
-        local_host: &str,
-        target: String,
-        secret: String,
-    ) -> Self {
+    pub fn p2p_subscriber(port: u16, local_host: &str, target: String, secret: String) -> Self {
         use sha2::{Digest, Sha256};
         let hash = hex::encode(Sha256::digest(secret.as_bytes()));
         Self {

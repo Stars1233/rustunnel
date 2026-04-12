@@ -625,11 +625,7 @@ impl TestClient {
     }
 
     /// Send a P2pConnect request. Returns the conn_id on success.
-    pub async fn p2p_connect(
-        &mut self,
-        target: &str,
-        secret_hash: &str,
-    ) -> Result<Uuid, String> {
+    pub async fn p2p_connect(&mut self, target: &str, secret_hash: &str) -> Result<Uuid, String> {
         let req_id = Uuid::new_v4().to_string();
         self.send(&ControlFrame::P2pConnect {
             request_id: req_id,

@@ -385,10 +385,7 @@ impl TunnelCore {
     }
 
     /// Look up a P2P publisher by name and return it with the session control channel.
-    pub fn resolve_p2p(
-        &self,
-        name: &str,
-    ) -> Option<(P2pPublisher, mpsc::Sender<ControlMessage>)> {
+    pub fn resolve_p2p(&self, name: &str) -> Option<(P2pPublisher, mpsc::Sender<ControlMessage>)> {
         let publisher = self.p2p_tunnels.get(name)?.clone();
         let tx = self
             .sessions

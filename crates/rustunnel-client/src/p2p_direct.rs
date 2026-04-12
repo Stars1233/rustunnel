@@ -159,9 +159,7 @@ async fn establish_quic_client(
     // Short delay to let the server side set up.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let connecting = endpoint
-        .connect(peer_addr, "rustunnel-p2p")
-        .ok()?;
+    let connecting = endpoint.connect(peer_addr, "rustunnel-p2p").ok()?;
 
     let connection = tokio::time::timeout(Duration::from_secs(10), connecting)
         .await
@@ -178,9 +176,7 @@ async fn establish_quic_client(
 
 /// Create QUIC server and client configs using a self-signed cert
 /// derived from the shared secret.
-fn make_quic_configs(
-    shared_secret: &[u8],
-) -> Option<(QuinnServerConfig, ClientConfig)> {
+fn make_quic_configs(shared_secret: &[u8]) -> Option<(QuinnServerConfig, ClientConfig)> {
     // Generate a deterministic self-signed cert from the shared secret.
     // Both sides derive the same cert, so the subscriber can verify the publisher.
     use sha2::{Digest, Sha256};
@@ -197,7 +193,8 @@ fn make_quic_configs(
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(cert_key.serialize_der()).ok()?;
 
     // Server config
-    let server_config = QuinnServerConfig::with_single_cert(vec![cert_der.clone()], key_der).ok()?;
+    let server_config =
+        QuinnServerConfig::with_single_cert(vec![cert_der.clone()], key_der).ok()?;
 
     // Client config — skip server cert verification (both sides use the same
     // self-signed cert derived from the shared secret, so we trust it implicitly).
@@ -260,10 +257,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 ///
 /// Opens a bidirectional QUIC stream, connects to the local service,
 /// and copies data in both directions.
-pub async fn bridge_quic_to_local(
-    connection: quinn::Connection,
-    local_addr: &str,
-) {
+pub async fn bridge_quic_to_local(connection: quinn::Connection, local_addr: &str) {
     loop {
         // Accept streams from the peer (publisher accepts from subscriber).
         let (mut send, mut recv) = match connection.accept_bi().await {

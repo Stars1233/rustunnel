@@ -338,7 +338,11 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             client_addr,
             region_id: state.region.id.clone(),
             nat_type: publisher.nat_type.clone(),
-            mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
+            mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                None
+            } else {
+                Some(publisher.mapped_addrs.clone())
+            },
         });
     }
 
@@ -471,7 +475,11 @@ async fn get_tunnel(
                 client_addr,
                 region_id: state.region.id.clone(),
                 nat_type: publisher.nat_type.clone(),
-                mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
+                mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                    None
+                } else {
+                    Some(publisher.mapped_addrs.clone())
+                },
             })
             .into_response();
         }
@@ -1298,7 +1306,11 @@ async fn tunnel_p2p_peers(
                 request_count: info.request_count.load(Ordering::Relaxed),
                 bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
                 nat_type: publisher.nat_type.clone(),
-                mapped_addrs: if publisher.mapped_addrs.is_empty() { None } else { Some(publisher.mapped_addrs.clone()) },
+                mapped_addrs: if publisher.mapped_addrs.is_empty() {
+                    None
+                } else {
+                    Some(publisher.mapped_addrs.clone())
+                },
                 connected_since: instant_to_iso(info.created_at),
             })
             .into_response();

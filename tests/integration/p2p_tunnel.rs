@@ -106,7 +106,10 @@ async fn p2p_connect_correct_secret() {
     let mut subscriber = TestClient::connect(&server).await.expect("sub auth");
     let conn_id = subscriber.p2p_connect("relay-test", "the-hash").await;
 
-    assert!(conn_id.is_ok(), "P2P connect with correct secret should succeed");
+    assert!(
+        conn_id.is_ok(),
+        "P2P connect with correct secret should succeed"
+    );
     assert!(!conn_id.unwrap().is_nil(), "conn_id should be valid");
 }
 

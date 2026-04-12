@@ -16,10 +16,7 @@ use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
 /// Default STUN servers for NAT detection.
-pub const DEFAULT_STUN_SERVERS: &[&str] = &[
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-];
+pub const DEFAULT_STUN_SERVERS: &[&str] = &["stun.l.google.com:19302", "stun1.l.google.com:19302"];
 
 /// STUN magic cookie (RFC 5389).
 const MAGIC_COOKIE: u32 = 0x2112A442;
@@ -82,7 +79,9 @@ pub async fn probe_nat(stun_servers: &[String]) -> StunResult {
         }
     };
 
-    let local_addr = socket.local_addr().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+    let local_addr = socket
+        .local_addr()
+        .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
 
     let mapped1 = stun_binding_request(&socket, servers[0]).await;
     let mapped2 = stun_binding_request(&socket, servers[1]).await;
@@ -281,7 +280,10 @@ mod tests {
         let tx_id = [0u8; 12];
         let result = parse_xor_mapped_address(&data, &tx_id).unwrap();
         assert_eq!(result.port(), port);
-        assert_eq!(result.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)));
+        assert_eq!(
+            result.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1))
+        );
     }
 
     #[test]
