@@ -506,6 +506,11 @@ request_body_max_bytes = 10485760
 # Inclusive port range reserved for TCP tunnels.
 # Each active TCP tunnel consumes one port from this range.
 tcp_port_range = [20000, 20099]
+
+# Inclusive port range reserved for UDP tunnels.
+# Each active UDP tunnel consumes one port from this range.
+# Must not overlap with tcp_port_range. Set to [0, 0] to disable UDP tunnels.
+udp_port_range = [20100, 20199]
 ```
 
 Secure the file:
@@ -595,6 +600,9 @@ ufw allow 9090/tcp comment "rustunnel Prometheus metrics"
 
 # TCP tunnel port range (must match tcp_port_range in server.toml)
 ufw allow 20000:20099/tcp comment "rustunnel TCP tunnels"
+
+# UDP tunnel port range (must match udp_port_range in server.toml)
+ufw allow 20100:20199/udp comment "rustunnel UDP tunnels"
 ```
 
 ### 10 — Verify the server is running
@@ -850,6 +858,7 @@ curl -s -X POST https://your-server:8443/api/tokens \
 | 8443 | TCP | Dashboard UI and REST API |
 | 9090 | TCP | Prometheus metrics (`/metrics`) |
 | 20000–20099 | TCP | TCP tunnel range (configurable via `tcp_port_range`) |
+| 20100–20199 | UDP | UDP tunnel range (configurable via `udp_port_range`) |
 
 ---
 
@@ -884,6 +893,7 @@ curl -s -X POST https://your-server:8443/api/tokens \
 | `limits.ip_rate_limit_rps` | u32 | `100` | Per-source-IP rate cap (req/s); `0` = disabled |
 | `limits.request_body_max_bytes` | usize | — | Max proxied request body size (bytes) |
 | `limits.tcp_port_range` | [u16, u16] | — | Inclusive `[low, high]` TCP tunnel port range |
+| `limits.udp_port_range` | [u16, u16] | `[0, 0]` | Inclusive `[low, high]` UDP tunnel port range; `[0, 0]` disables UDP tunnels |
 | `region.id` | string | `"default"` | Region identifier recorded in tunnel history (e.g. `"eu"`, `"us"`, `"ap"`) |
 | `region.name` | string | `"Default"` | Human-readable region name shown in the dashboard |
 | `region.location` | string | `""` | Physical location label (e.g. `"Helsinki, FI"`) |
