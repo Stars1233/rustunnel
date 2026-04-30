@@ -146,6 +146,7 @@ Items below are not committed to any release timeline. They represent directions
 - [ ] Windows support for the client binary
 - [ ] Config file hot-reload (SIGHUP) without restarting the server
 - [ ] Health check / heartbeat endpoint for load balancer probing
+- [ ] Group-based load balancing across multiple backends — multiple clients register against the same HTTP subdomain or TCP port under a shared group + group key, and inbound connections are dispatched at random to a healthy member. Includes built-in TCP and HTTP health checks (interval / timeout / max-failed) so unhealthy backends are removed from the pool automatically. Modeled on FRP's `loadBalancer.group` / `healthCheck` config; see [TUNNEL-7]
 
 ### Multi-region (Phase 5 — unified dashboard) ✅ Complete
 - [x] Dashboard fan-out queries — active tunnels aggregated across all regions via parallel API calls
