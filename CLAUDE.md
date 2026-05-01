@@ -131,9 +131,9 @@ Central shared state, `Arc`-wrapped and passed to all subsystems:
 
 ```rust
 pub struct TunnelCore {
-    http_routes: DashMap<String, TunnelInfo>,        // subdomain → tunnel
-    tcp_routes:  DashMap<u16, TunnelInfo>,           // port → tunnel
-    udp_routes:  DashMap<u16, TunnelInfo>,           // port → tunnel
+    http_routes: DashMap<String, Arc<TunnelGroup>>,  // subdomain → group of members
+    tcp_routes:  DashMap<u16, Arc<TunnelGroup>>,     // port → group of members
+    udp_routes:  DashMap<u16, Arc<TunnelGroup>>,     // port → group of members
     p2p_tunnels: DashMap<String, P2pPublisher>,      // name → P2P publisher
     sessions:    DashMap<Uuid, SessionInfo>,         // connected clients
     available_tcp_ports: Mutex<Vec<u16>>,            // free TCP port pool
@@ -146,6 +146,16 @@ pub struct TunnelCore {
     ip_limiter:   Arc<IpRateLimiter>,                // per-source-IP sliding window
 }
 ```
+
+Each route key resolves to a `TunnelGroup` of one or more `GroupMember`s
+(see `core/tunnel.rs`). Today every group has exactly one member — the route
+shape is in place ahead of TUNNEL-7 group-based load balancing (`see
+../rustunnel-private/docs/development/load-balancing-and-health-checks.md`).
+`resolve_http` / `resolve_tcp` / `resolve_udp` pick a healthy member uniformly
+at random; ungrouped registrations stay healthy for life. The
+`[load_balancing] enabled` flag in `server.toml` is the kill switch for
+honouring multi-member groups (defaults to `false`; flipped on per region
+during the EU → US → AP rollout).
 
 ### Protocol (`crates/rustunnel-protocol/src/frame.rs`)
 

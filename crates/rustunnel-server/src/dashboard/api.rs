@@ -180,7 +180,20 @@ async fn status_handler(State(state): State<ApiState>) -> impl IntoResponse {
             location: state.region.location.clone(),
         },
         active_sessions: state.core.sessions.len(),
-        active_tunnels: state.core.http_routes.len() + state.core.tcp_routes.len(),
+        // Count members, not groups — Phase 1 has 1 member per group so the
+        // numbers match historical data; later phases may diverge.
+        active_tunnels: state
+            .core
+            .http_routes
+            .iter()
+            .map(|g| g.members.len())
+            .sum::<usize>()
+            + state
+                .core
+                .tcp_routes
+                .iter()
+                .map(|g| g.members.len())
+                .sum::<usize>(),
     })
 }
 
@@ -253,70 +266,82 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
 
     let mut tunnels: Vec<TunnelSummary> = Vec::new();
 
+    // One row per member. For Phase 1 every group has a single member, so
+    // the row shape is unchanged from before. Phase 5 of TUNNEL-7 will add
+    // group-aware fields (member_count, healthy pill, etc.) on top.
     for entry in state.core.http_routes.iter() {
-        let info = entry.value();
-        let client_addr = state
-            .core
-            .sessions
-            .get(&info.session_id)
-            .map(|s| s.client_addr.to_string())
-            .unwrap_or_default();
-        tunnels.push(TunnelSummary {
-            tunnel_id: info.tunnel_id.to_string(),
-            protocol: "http".into(),
-            label: entry.key().clone(),
-            public_url: format!("https://{}", entry.key()),
-            connected_since: instant_to_iso(info.created_at),
-            request_count: info.request_count.load(Ordering::Relaxed),
-            client_addr,
-            region_id: state.region.id.clone(),
-            nat_type: None,
-            mapped_addrs: None,
-        });
+        let subdomain = entry.key().clone();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            let client_addr = state
+                .core
+                .sessions
+                .get(&info.session_id)
+                .map(|s| s.client_addr.to_string())
+                .unwrap_or_default();
+            tunnels.push(TunnelSummary {
+                tunnel_id: info.tunnel_id.to_string(),
+                protocol: "http".into(),
+                label: subdomain.clone(),
+                public_url: format!("https://{subdomain}"),
+                connected_since: instant_to_iso(info.created_at),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                client_addr,
+                region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
+            });
+        }
     }
 
     for entry in state.core.tcp_routes.iter() {
-        let info = entry.value();
-        let client_addr = state
-            .core
-            .sessions
-            .get(&info.session_id)
-            .map(|s| s.client_addr.to_string())
-            .unwrap_or_default();
-        tunnels.push(TunnelSummary {
-            tunnel_id: info.tunnel_id.to_string(),
-            protocol: "tcp".into(),
-            label: entry.key().to_string(),
-            public_url: format!("tcp://:{}", entry.key()),
-            connected_since: instant_to_iso(info.created_at),
-            request_count: info.request_count.load(Ordering::Relaxed),
-            client_addr,
-            region_id: state.region.id.clone(),
-            nat_type: None,
-            mapped_addrs: None,
-        });
+        let port = *entry.key();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            let client_addr = state
+                .core
+                .sessions
+                .get(&info.session_id)
+                .map(|s| s.client_addr.to_string())
+                .unwrap_or_default();
+            tunnels.push(TunnelSummary {
+                tunnel_id: info.tunnel_id.to_string(),
+                protocol: "tcp".into(),
+                label: port.to_string(),
+                public_url: format!("tcp://:{port}"),
+                connected_since: instant_to_iso(info.created_at),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                client_addr,
+                region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
+            });
+        }
     }
 
     for entry in state.core.udp_routes.iter() {
-        let info = entry.value();
-        let client_addr = state
-            .core
-            .sessions
-            .get(&info.session_id)
-            .map(|s| s.client_addr.to_string())
-            .unwrap_or_default();
-        tunnels.push(TunnelSummary {
-            tunnel_id: info.tunnel_id.to_string(),
-            protocol: "udp".into(),
-            label: entry.key().to_string(),
-            public_url: format!("udp://:{}", entry.key()),
-            connected_since: instant_to_iso(info.created_at),
-            request_count: info.request_count.load(Ordering::Relaxed),
-            client_addr,
-            region_id: state.region.id.clone(),
-            nat_type: None,
-            mapped_addrs: None,
-        });
+        let port = *entry.key();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            let client_addr = state
+                .core
+                .sessions
+                .get(&info.session_id)
+                .map(|s| s.client_addr.to_string())
+                .unwrap_or_default();
+            tunnels.push(TunnelSummary {
+                tunnel_id: info.tunnel_id.to_string(),
+                protocol: "udp".into(),
+                label: port.to_string(),
+                public_url: format!("udp://:{port}"),
+                connected_since: instant_to_iso(info.created_at),
+                request_count: info.request_count.load(Ordering::Relaxed),
+                client_addr,
+                region_id: state.region.id.clone(),
+                nat_type: None,
+                mapped_addrs: None,
+            });
+        }
     }
 
     for entry in state.core.p2p_tunnels.iter() {
@@ -378,79 +403,88 @@ async fn get_tunnel(
 
     // Search HTTP routes first.
     for entry in state.core.http_routes.iter() {
-        if entry.value().tunnel_id.to_string() == id {
-            let info = entry.value();
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            return Json(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "http".into(),
-                label: entry.key().clone(),
-                public_url: format!("https://{}", entry.key()),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            })
-            .into_response();
+        let subdomain = entry.key().clone();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            if info.tunnel_id.to_string() == id {
+                let client_addr = state
+                    .core
+                    .sessions
+                    .get(&info.session_id)
+                    .map(|s| s.client_addr.to_string())
+                    .unwrap_or_default();
+                return Json(TunnelSummary {
+                    tunnel_id: info.tunnel_id.to_string(),
+                    protocol: "http".into(),
+                    label: subdomain.clone(),
+                    public_url: format!("https://{subdomain}"),
+                    connected_since: instant_to_iso(info.created_at),
+                    request_count: info.request_count.load(Ordering::Relaxed),
+                    client_addr,
+                    region_id: state.region.id.clone(),
+                    nat_type: None,
+                    mapped_addrs: None,
+                })
+                .into_response();
+            }
         }
     }
 
     // Then TCP routes.
     for entry in state.core.tcp_routes.iter() {
-        if entry.value().tunnel_id.to_string() == id {
-            let info = entry.value();
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            return Json(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "tcp".into(),
-                label: entry.key().to_string(),
-                public_url: format!("tcp://:{}", entry.key()),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            })
-            .into_response();
+        let port = *entry.key();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            if info.tunnel_id.to_string() == id {
+                let client_addr = state
+                    .core
+                    .sessions
+                    .get(&info.session_id)
+                    .map(|s| s.client_addr.to_string())
+                    .unwrap_or_default();
+                return Json(TunnelSummary {
+                    tunnel_id: info.tunnel_id.to_string(),
+                    protocol: "tcp".into(),
+                    label: port.to_string(),
+                    public_url: format!("tcp://:{port}"),
+                    connected_since: instant_to_iso(info.created_at),
+                    request_count: info.request_count.load(Ordering::Relaxed),
+                    client_addr,
+                    region_id: state.region.id.clone(),
+                    nat_type: None,
+                    mapped_addrs: None,
+                })
+                .into_response();
+            }
         }
     }
 
     // Then UDP routes.
     for entry in state.core.udp_routes.iter() {
-        if entry.value().tunnel_id.to_string() == id {
-            let info = entry.value();
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            return Json(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "udp".into(),
-                label: entry.key().to_string(),
-                public_url: format!("udp://:{}", entry.key()),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            })
-            .into_response();
+        let port = *entry.key();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            if info.tunnel_id.to_string() == id {
+                let client_addr = state
+                    .core
+                    .sessions
+                    .get(&info.session_id)
+                    .map(|s| s.client_addr.to_string())
+                    .unwrap_or_default();
+                return Json(TunnelSummary {
+                    tunnel_id: info.tunnel_id.to_string(),
+                    protocol: "udp".into(),
+                    label: port.to_string(),
+                    public_url: format!("udp://:{port}"),
+                    connected_since: instant_to_iso(info.created_at),
+                    request_count: info.request_count.load(Ordering::Relaxed),
+                    client_addr,
+                    region_id: state.region.id.clone(),
+                    nat_type: None,
+                    mapped_addrs: None,
+                })
+                .into_response();
+            }
         }
     }
 
@@ -878,8 +912,20 @@ async fn admin_platform_usage(
     if let Err(e) = require_admin(&headers, &state).await {
         return e.into_response();
     }
-    // Count live tunnels from in-memory state (matches the Tunnels tab source of truth).
-    let live_tunnels = (state.core.http_routes.len() + state.core.tcp_routes.len()) as i64;
+    // Count live tunnels from in-memory state (matches the Tunnels tab source
+    // of truth). Members, not groups — keeps the historical metric meaning.
+    let live_tunnels = (state
+        .core
+        .http_routes
+        .iter()
+        .map(|g| g.members.len())
+        .sum::<usize>()
+        + state
+            .core
+            .tcp_routes
+            .iter()
+            .map(|g| g.members.len())
+            .sum::<usize>()) as i64;
 
     match db::get_platform_usage(&state.db.pg).await {
         Ok(mut usage) => {
@@ -1254,17 +1300,20 @@ async fn tunnel_udp_sessions(
 
     // Find the UDP tunnel by ID.
     for entry in state.core.udp_routes.iter() {
-        let info = entry.value();
-        if info.tunnel_id.to_string() == id {
-            return Json(UdpSessionInfo {
-                tunnel_id: info.tunnel_id.to_string(),
-                port: *entry.key(),
-                protocol: "udp".into(),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
-                connected_since: instant_to_iso(info.created_at),
-            })
-            .into_response();
+        let port = *entry.key();
+        for member in entry.value().members.iter() {
+            let info = &member.info;
+            if info.tunnel_id.to_string() == id {
+                return Json(UdpSessionInfo {
+                    tunnel_id: info.tunnel_id.to_string(),
+                    port,
+                    protocol: "udp".into(),
+                    request_count: info.request_count.load(Ordering::Relaxed),
+                    bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+                    connected_since: instant_to_iso(info.created_at),
+                })
+                .into_response();
+            }
         }
     }
 

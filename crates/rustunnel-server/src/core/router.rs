@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use rand::seq::IteratorRandom;
 use tokio::io::DuplexStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use uuid::Uuid;
@@ -15,7 +16,9 @@ use crate::error::{Error, Result};
 
 use super::ip_limiter::IpRateLimiter;
 use super::limiter::RateLimiter;
-use super::tunnel::{ControlMessage, SessionInfo, TcpTunnelEvent, TunnelInfo, UdpTunnelEvent};
+use super::tunnel::{
+    ControlMessage, SessionInfo, TcpTunnelEvent, TunnelGroup, TunnelInfo, UdpTunnelEvent,
+};
 
 /// Broadcast channel capacity for TCP/UDP tunnel lifecycle events.
 const TCP_EVENT_CAPACITY: usize = 64;
@@ -28,12 +31,19 @@ const UDP_EVENT_CAPACITY: usize = 64;
 /// All public methods are designed to be called from many async tasks concurrently;
 /// interior mutability is provided by `DashMap` and `parking_lot::Mutex`.
 pub struct TunnelCore {
-    /// subdomain → TunnelInfo  (HTTP / HTTPS tunnels)
-    pub http_routes: DashMap<String, TunnelInfo>,
-    /// port → TunnelInfo  (TCP tunnels)
-    pub tcp_routes: DashMap<u16, TunnelInfo>,
-    /// port → TunnelInfo  (UDP tunnels)
-    pub udp_routes: DashMap<u16, TunnelInfo>,
+    /// subdomain → group of HTTP/HTTPS members.
+    ///
+    /// In Phase 1 every group has exactly one member (degenerate case);
+    /// Phase 2 of TUNNEL-7 lifts the cap so multiple clients can register the
+    /// same subdomain with a shared `group_key` and share traffic.
+    pub http_routes: DashMap<String, Arc<TunnelGroup>>,
+    /// port → group of TCP members. Same shape as `http_routes` — Phase 3
+    /// allows multiple clients on the same port via groups.
+    pub tcp_routes: DashMap<u16, Arc<TunnelGroup>>,
+    /// port → group of UDP members. UDP grouping isn't on the roadmap yet
+    /// (see plan §6); the `Arc<TunnelGroup>` wrapper keeps the dispatch path
+    /// uniform with HTTP/TCP.
+    pub udp_routes: DashMap<u16, Arc<TunnelGroup>>,
     /// name → P2pPublisher  (P2P tunnels registered by publishers)
     pub p2p_tunnels: DashMap<String, P2pPublisher>,
     /// session_id → SessionInfo
@@ -263,7 +273,8 @@ impl TunnelCore {
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
-        self.http_routes.insert(subdomain.clone(), info);
+        let group = TunnelGroup::new_solo(subdomain.clone(), info);
+        self.http_routes.insert(subdomain.clone(), group);
         self.tunnel_index
             .insert(tunnel_id, TunnelKey::Http(subdomain.clone()));
         self.add_tunnel_to_session(session_id, tunnel_id);
@@ -295,7 +306,8 @@ impl TunnelCore {
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
-        self.tcp_routes.insert(port, info);
+        let group = TunnelGroup::new_solo(port.to_string(), info);
+        self.tcp_routes.insert(port, group);
         self.tunnel_index.insert(tunnel_id, TunnelKey::Tcp(port));
         self.add_tunnel_to_session(session_id, tunnel_id);
         let _ = self
@@ -329,7 +341,8 @@ impl TunnelCore {
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
-        self.udp_routes.insert(port, info);
+        let group = TunnelGroup::new_solo(port.to_string(), info);
+        self.udp_routes.insert(port, group);
         self.tunnel_index.insert(tunnel_id, TunnelKey::Udp(port));
         self.add_tunnel_to_session(session_id, tunnel_id);
         let _ = self
@@ -415,23 +428,59 @@ impl TunnelCore {
     }
 
     /// Remove a tunnel by ID, returning any allocated TCP/UDP port to the pool.
+    ///
+    /// For grouped routes the member is removed from its `TunnelGroup`; the
+    /// group itself (and the associated route entry, port allocation, and
+    /// edge listener) only goes away when the *last* member leaves.
+    /// Phase 1 has one-member-per-group, so every removal is the last one;
+    /// this shape keeps Phase 2/3 from having to revisit the removal path.
     pub fn remove_tunnel(&self, tunnel_id: &Uuid) {
         let Some((_, key)) = self.tunnel_index.remove(tunnel_id) else {
             return;
         };
         match key {
             TunnelKey::Http(subdomain) => {
-                self.http_routes.remove(&subdomain);
+                let group_empty = self
+                    .http_routes
+                    .get(&subdomain)
+                    .map(|g| {
+                        g.members.remove(tunnel_id);
+                        g.members.is_empty()
+                    })
+                    .unwrap_or(true);
+                if group_empty {
+                    self.http_routes.remove(&subdomain);
+                }
             }
             TunnelKey::Tcp(port) => {
-                self.tcp_routes.remove(&port);
-                self.available_tcp_ports.lock().push(port);
-                let _ = self.tcp_events.send(TcpTunnelEvent::Unregistered { port });
+                let group_empty = self
+                    .tcp_routes
+                    .get(&port)
+                    .map(|g| {
+                        g.members.remove(tunnel_id);
+                        g.members.is_empty()
+                    })
+                    .unwrap_or(true);
+                if group_empty {
+                    self.tcp_routes.remove(&port);
+                    self.available_tcp_ports.lock().push(port);
+                    let _ = self.tcp_events.send(TcpTunnelEvent::Unregistered { port });
+                }
             }
             TunnelKey::Udp(port) => {
-                self.udp_routes.remove(&port);
-                self.available_udp_ports.lock().push(port);
-                let _ = self.udp_events.send(UdpTunnelEvent::Unregistered { port });
+                let group_empty = self
+                    .udp_routes
+                    .get(&port)
+                    .map(|g| {
+                        g.members.remove(tunnel_id);
+                        g.members.is_empty()
+                    })
+                    .unwrap_or(true);
+                if group_empty {
+                    self.udp_routes.remove(&port);
+                    self.available_udp_ports.lock().push(port);
+                    let _ = self.udp_events.send(UdpTunnelEvent::Unregistered { port });
+                }
             }
             TunnelKey::P2p(name) => {
                 self.p2p_tunnels.remove(&name);
@@ -439,24 +488,38 @@ impl TunnelCore {
         }
     }
 
-    /// Return the current proxied-request count for a tunnel without removing it.
+    /// Return the current proxied-request count for the *specific* member
+    /// identified by `tunnel_id`. Per-member counters keep billing and
+    /// dashboards honest; aggregate at the group level when displaying.
     /// Returns 0 if the tunnel is unknown.
     pub fn get_tunnel_request_count(&self, tunnel_id: &Uuid) -> u64 {
         match self.tunnel_index.get(tunnel_id).as_deref() {
             Some(TunnelKey::Http(sub)) => self
                 .http_routes
                 .get(sub)
-                .map(|t| t.request_count.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.request_count.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::Tcp(port)) => self
                 .tcp_routes
                 .get(port)
-                .map(|t| t.request_count.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.request_count.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::Udp(port)) => self
                 .udp_routes
                 .get(port)
-                .map(|t| t.request_count.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.request_count.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::P2p(name)) => self
                 .p2p_tunnels
@@ -467,24 +530,36 @@ impl TunnelCore {
         }
     }
 
-    /// Return the current bytes-proxied counter for a tunnel without removing it.
+    /// Return the current bytes-proxied counter for a member.
     /// Returns 0 if the tunnel is unknown.
     pub fn get_tunnel_bytes_proxied(&self, tunnel_id: &Uuid) -> u64 {
         match self.tunnel_index.get(tunnel_id).as_deref() {
             Some(TunnelKey::Http(sub)) => self
                 .http_routes
                 .get(sub)
-                .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.bytes_proxied.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::Tcp(port)) => self
                 .tcp_routes
                 .get(port)
-                .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.bytes_proxied.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::Udp(port)) => self
                 .udp_routes
                 .get(port)
-                .map(|t| t.bytes_proxied.load(Ordering::Relaxed))
+                .and_then(|g| {
+                    g.members
+                        .get(tunnel_id)
+                        .map(|m| m.info.bytes_proxied.load(Ordering::Relaxed))
+                })
                 .unwrap_or(0),
             Some(TunnelKey::P2p(name)) => self
                 .p2p_tunnels
@@ -498,30 +573,53 @@ impl TunnelCore {
     // ── resolution (hot path) ─────────────────────────────────────────────────
 
     /// Look up the tunnel and its session's control channel by subdomain.
+    ///
+    /// Picks a healthy member uniformly at random. In Phase 1 every group
+    /// has exactly one (always-healthy) member, so this degenerates to the
+    /// previous behaviour. Once Phase 2 lands, the random pick gives us
+    /// FRP-style group dispatch with no further routing-layer changes.
     pub fn resolve_http(
         &self,
         subdomain: &str,
     ) -> Option<(TunnelInfo, mpsc::Sender<ControlMessage>)> {
-        let tunnel = self.http_routes.get(subdomain)?.clone();
-        let tx = self.sessions.get(&tunnel.session_id)?.control_tx.clone();
-        tunnel.request_count.fetch_add(1, Ordering::Relaxed);
-        Some((tunnel, tx))
+        let group = self.http_routes.get(subdomain)?.clone();
+        self.dispatch_member(&group)
     }
 
     /// Look up the tunnel and its session's control channel by TCP port.
     pub fn resolve_tcp(&self, port: u16) -> Option<(TunnelInfo, mpsc::Sender<ControlMessage>)> {
-        let tunnel = self.tcp_routes.get(&port)?.clone();
-        let tx = self.sessions.get(&tunnel.session_id)?.control_tx.clone();
-        tunnel.request_count.fetch_add(1, Ordering::Relaxed);
-        Some((tunnel, tx))
+        let group = self.tcp_routes.get(&port)?.clone();
+        self.dispatch_member(&group)
     }
 
     /// Look up the tunnel and its session's control channel by UDP port.
     pub fn resolve_udp(&self, port: u16) -> Option<(TunnelInfo, mpsc::Sender<ControlMessage>)> {
-        let tunnel = self.udp_routes.get(&port)?.clone();
-        let tx = self.sessions.get(&tunnel.session_id)?.control_tx.clone();
-        tunnel.request_count.fetch_add(1, Ordering::Relaxed);
-        Some((tunnel, tx))
+        let group = self.udp_routes.get(&port)?.clone();
+        self.dispatch_member(&group)
+    }
+
+    /// Pick one healthy member of `group` and return its tunnel info plus
+    /// the owning session's control channel. Returns `None` when no member
+    /// is healthy or the picked member's session has gone away.
+    fn dispatch_member(
+        &self,
+        group: &TunnelGroup,
+    ) -> Option<(TunnelInfo, mpsc::Sender<ControlMessage>)> {
+        // Pick uniformly at random among healthy members. We snapshot the
+        // chosen member's TunnelInfo (cheap — it's mostly Arc-wrapped
+        // counters) and drop the DashMap iter so we don't hold a shard lock
+        // across the session lookup.
+        let mut rng = rand::thread_rng();
+        let info = group
+            .members
+            .iter()
+            .filter(|m| m.healthy.load(Ordering::Acquire))
+            .map(|m| m.info.clone())
+            .choose(&mut rng)?;
+
+        let tx = self.sessions.get(&info.session_id)?.control_tx.clone();
+        info.request_count.fetch_add(1, Ordering::Relaxed);
+        Some((info, tx))
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -928,5 +1026,76 @@ mod tests {
         let (strategy, attempt) = classify_nat_pair(None, None);
         assert_eq!(strategy, "relay");
         assert!(!attempt);
+    }
+
+    // ── group sanity (Phase 1 of TUNNEL-7) ───────────────────────────────
+
+    /// Every solo registration is wrapped in a degenerate one-member group;
+    /// dispatch must still return that single member.
+    #[test]
+    fn http_solo_registration_creates_one_member_group() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+        let (tid, _) = core
+            .register_http_tunnel(&sid, Some("solo".into()), TunnelProtocol::Http)
+            .unwrap();
+
+        let group = core.http_routes.get("solo").unwrap();
+        assert_eq!(group.members.len(), 1);
+        assert!(group.members.contains_key(&tid));
+        assert!(
+            group.key_hash.is_none(),
+            "no group_key on solo registrations"
+        );
+        assert_eq!(group.name, "solo");
+    }
+
+    /// Removing the only member of a group also removes the group itself
+    /// (and, for TCP, returns the port to the pool — exercised by the
+    /// existing `remove_tcp_tunnel_returns_port_to_pool` test).
+    #[test]
+    fn last_member_removal_evicts_group() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+        let (tid, _) = core
+            .register_http_tunnel(&sid, Some("ephemeral".into()), TunnelProtocol::Http)
+            .unwrap();
+        assert!(core.http_routes.contains_key("ephemeral"));
+
+        core.remove_tunnel(&tid);
+        assert!(!core.http_routes.contains_key("ephemeral"));
+    }
+
+    /// Members marked unhealthy must be skipped by dispatch even though
+    /// they're still in the routing table. Phase 4 will be the first place
+    /// this bit gets flipped on a real `TunnelUnhealthy` frame; the dispatch
+    /// path is already wired so we lock it in with a test now.
+    #[test]
+    fn unhealthy_member_is_excluded_from_dispatch() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+        let (tid, _) = core
+            .register_http_tunnel(&sid, Some("toggle".into()), TunnelProtocol::Http)
+            .unwrap();
+
+        // Flip the lone member to unhealthy.
+        {
+            let group = core.http_routes.get("toggle").unwrap();
+            let member = group.members.get(&tid).unwrap();
+            member.healthy.store(false, Ordering::Release);
+        }
+
+        assert!(
+            core.resolve_http("toggle").is_none(),
+            "no healthy members → resolve must return None"
+        );
+
+        // Mark healthy again → dispatch resumes.
+        {
+            let group = core.http_routes.get("toggle").unwrap();
+            let member = group.members.get(&tid).unwrap();
+            member.healthy.store(true, Ordering::Release);
+        }
+        assert!(core.resolve_http("toggle").is_some());
     }
 }

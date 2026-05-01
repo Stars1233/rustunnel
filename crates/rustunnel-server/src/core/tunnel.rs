@@ -1,14 +1,15 @@
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::Instant;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::io::DuplexStream;
 use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
-use rustunnel_protocol::TunnelProtocol;
+use rustunnel_protocol::{HealthCheckSpec, TunnelProtocol};
 
 // ── TCP tunnel events (edge ↔ core) ───────────────────────────────────────────
 
@@ -63,6 +64,76 @@ pub struct TunnelInfo {
     /// Limits concurrent proxied connections for this tunnel.
     /// Shared across all clones so every proxy task draws from the same pool.
     pub conn_semaphore: Arc<Semaphore>,
+}
+
+// ── Load-balancing groups (TUNNEL-7) ──────────────────────────────────────────
+//
+// A `TunnelGroup` is the routing entry for an HTTP subdomain or a TCP/UDP
+// port. It holds one or more `GroupMember`s — each backed by a separate
+// `RegisterTunnel` from a separate client. Phase 1 only ever has a single
+// member per group (the "degenerate" case); multi-member registration arrives
+// in Phase 2/3.
+//
+// Storing this on the routing-table value side (instead of a separate map of
+// pools) makes resolution a single DashMap lookup and lets remove-on-last-leave
+// happen atomically next to the existing route-removal code.
+
+/// One backend in a `TunnelGroup`.
+///
+/// `healthy` defaults to `true` when no `health_spec` is set (we trust the
+/// client's presence) and to `false` when a spec exists, until the first
+/// `TunnelHealthy` arrives.
+#[derive(Debug)]
+pub struct GroupMember {
+    pub info: TunnelInfo,
+    pub healthy: AtomicBool,
+    /// Health-check spec from `RegisterTunnel.health_check`; `None` if the
+    /// client didn't ask for probes.
+    pub health_spec: Option<HealthCheckSpec>,
+    /// Tracked server-side for surfacing on the dashboard. Probe failures are
+    /// detected on the client; this counter is incremented on each
+    /// `TunnelUnhealthy` frame.
+    pub consecutive_failures: AtomicU32,
+}
+
+impl GroupMember {
+    /// Create a member that's immediately considered healthy. Used for the
+    /// Phase 1 path where no health-check spec is attached.
+    pub fn healthy_with(info: TunnelInfo) -> Self {
+        Self {
+            info,
+            healthy: AtomicBool::new(true),
+            health_spec: None,
+            consecutive_failures: AtomicU32::new(0),
+        }
+    }
+}
+
+/// A pool of one or more members serving the same subdomain or port.
+#[derive(Debug)]
+pub struct TunnelGroup {
+    /// Display name (== subdomain for HTTP, port-as-string for TCP/UDP, or
+    /// the user-supplied `group` from `RegisterTunnel` once Phase 2 lands).
+    pub name: String,
+    /// SHA-256 of the user-supplied `group_key`. `None` for ungrouped /
+    /// degenerate single-member registrations (Phase 1).
+    pub key_hash: Option<String>,
+    /// Members keyed by their `tunnel_id`.
+    pub members: DashMap<Uuid, GroupMember>,
+}
+
+impl TunnelGroup {
+    pub fn new_solo(name: String, info: TunnelInfo) -> Arc<Self> {
+        let group = Arc::new(Self {
+            name,
+            key_hash: None,
+            members: DashMap::new(),
+        });
+        group
+            .members
+            .insert(info.tunnel_id, GroupMember::healthy_with(info));
+        group
+    }
 }
 
 // ── per-session state ─────────────────────────────────────────────────────────

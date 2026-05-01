@@ -482,6 +482,12 @@ where
             local_addr: _,
             p2p_secret_hash,
             p2p_name,
+            // Phase 0: accept the new load-balancing fields on the wire so old
+            // clients keep working unchanged. Server-side handling lands in
+            // later phases of TUNNEL-7.
+            group: _,
+            group_key_hash: _,
+            health_check: _,
         } => {
             tracing::debug!(%session_id, %request_id, ?protocol, "register tunnel");
 
@@ -1088,6 +1094,20 @@ where
             );
             // Store for dashboard visibility. These are informational only —
             // not used for billing (direct P2P traffic can't be verified).
+        }
+
+        // Phase 0 of TUNNEL-7: accept the new health-report frames so newer
+        // clients connecting to this server don't trip a `decode_frame`
+        // warning. Behaviour wires up in Phase 4 (group dispatch + healthy
+        // bit). Until then the only effect is a debug-level log line.
+        ControlFrame::TunnelHealthy { tunnel_id } => {
+            tracing::debug!(%session_id, %tunnel_id, "tunnel reported healthy (no-op pre-Phase-4)");
+        }
+        ControlFrame::TunnelUnhealthy { tunnel_id, reason } => {
+            tracing::debug!(
+                %session_id, %tunnel_id, %reason,
+                "tunnel reported unhealthy (no-op pre-Phase-4)"
+            );
         }
 
         other => {

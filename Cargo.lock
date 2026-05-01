@@ -2621,6 +2621,7 @@ dependencies = [
  "hyper-util",
  "instant-acme",
  "parking_lot",
+ "rand 0.8.5",
  "rcgen",
  "reqwest 0.12.28",
  "rustls",
