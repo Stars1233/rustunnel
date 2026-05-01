@@ -17,6 +17,26 @@ pub struct ServerConfig {
     /// P2P direct connection settings.
     #[serde(default)]
     pub p2p: P2pSection,
+    /// Load-balancing kill switch (TUNNEL-7, Phase 6 of the plan).
+    /// When `false` (default), grouped registrations fall through and behave
+    /// as solo tunnels exactly like today — protocol fields are accepted but
+    /// not honoured. Flip per region during the EU → US → AP rollout.
+    #[serde(default)]
+    pub load_balancing: LoadBalancingSection,
+}
+
+/// Per-region kill switch and tunables for group-based load balancing.
+///
+/// The default (`enabled = false`) is intentional — Phase 0 / Phase 1 ship
+/// the protocol and routing-table refactor without changing any user-visible
+/// behaviour. Phase 2/3 of the plan will start honouring this flag.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LoadBalancingSection {
+    /// Master switch. `false` → group/group_key_hash are accepted on
+    /// `RegisterTunnel` but ignored; `true` → registrations with the same
+    /// `(subdomain, group_key_hash)` form one pool with random dispatch.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -298,6 +318,7 @@ impl Default for ServerConfig {
                 location: "localhost".to_string(),
             },
             p2p: P2pSection::default(),
+            load_balancing: LoadBalancingSection::default(),
         }
     }
 }

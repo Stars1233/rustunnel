@@ -331,38 +331,37 @@ async fn run_metrics(addr: SocketAddr, core: Arc<TunnelCore>) -> Result<()> {
 }
 
 async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
+    use std::sync::atomic::Ordering;
+
     let sessions = core.sessions.len();
-    let http_tunnels = core.http_routes.len();
-    let tcp_tunnels = core.tcp_routes.len();
-    let udp_tunnels = core.udp_routes.len();
+    // Existing gauges count *members* (i.e. registered tunnels) so the
+    // numbers stay comparable with pre-load-balancing data. Phase 5 will add
+    // separate `rustunnel_group_members{...}` metrics keyed by group.
+    let http_tunnels: usize = core.http_routes.iter().map(|g| g.members.len()).sum();
+    let tcp_tunnels: usize = core.tcp_routes.iter().map(|g| g.members.len()).sum();
+    let udp_tunnels: usize = core.udp_routes.iter().map(|g| g.members.len()).sum();
     let p2p_tunnels = core.p2p_tunnels.len();
 
     // Compute aggregate bytes and request counts across all tunnel types.
     let mut total_bytes: u64 = 0;
     let mut total_requests: u64 = 0;
-    for entry in core.http_routes.iter() {
-        total_bytes += entry
-            .bytes_proxied
-            .load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry
-            .request_count
-            .load(std::sync::atomic::Ordering::Relaxed);
+    for group in core.http_routes.iter() {
+        for member in group.members.iter() {
+            total_bytes += member.info.bytes_proxied.load(Ordering::Relaxed);
+            total_requests += member.info.request_count.load(Ordering::Relaxed);
+        }
     }
-    for entry in core.tcp_routes.iter() {
-        total_bytes += entry
-            .bytes_proxied
-            .load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry
-            .request_count
-            .load(std::sync::atomic::Ordering::Relaxed);
+    for group in core.tcp_routes.iter() {
+        for member in group.members.iter() {
+            total_bytes += member.info.bytes_proxied.load(Ordering::Relaxed);
+            total_requests += member.info.request_count.load(Ordering::Relaxed);
+        }
     }
-    for entry in core.udp_routes.iter() {
-        total_bytes += entry
-            .bytes_proxied
-            .load(std::sync::atomic::Ordering::Relaxed);
-        total_requests += entry
-            .request_count
-            .load(std::sync::atomic::Ordering::Relaxed);
+    for group in core.udp_routes.iter() {
+        for member in group.members.iter() {
+            total_bytes += member.info.bytes_proxied.load(Ordering::Relaxed);
+            total_requests += member.info.request_count.load(Ordering::Relaxed);
+        }
     }
     for entry in core.p2p_tunnels.iter() {
         total_bytes += entry

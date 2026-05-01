@@ -271,6 +271,7 @@ impl TestServer {
                 enabled: true,
                 ..rustunnel_server::config::P2pSection::default()
             },
+            load_balancing: rustunnel_server::config::LoadBalancingSection::default(),
         });
 
         // Database.
@@ -519,6 +520,9 @@ impl TestClient {
             local_addr: "127.0.0.1:0".to_string(), // advisory only
             p2p_secret_hash: None,
             p2p_name: None,
+            group: None,
+            group_key_hash: None,
+            health_check: None,
         })
         .await?;
 
@@ -552,6 +556,9 @@ impl TestClient {
             local_addr: "127.0.0.1:0".to_string(),
             p2p_secret_hash: None,
             p2p_name: None,
+            group: None,
+            group_key_hash: None,
+            health_check: None,
         })
         .await?;
 
@@ -579,6 +586,9 @@ impl TestClient {
             local_addr: "127.0.0.1:0".to_string(),
             p2p_secret_hash: None,
             p2p_name: None,
+            group: None,
+            group_key_hash: None,
+            health_check: None,
         })
         .await?;
 
@@ -610,6 +620,9 @@ impl TestClient {
             local_addr: "127.0.0.1:0".to_string(),
             p2p_secret_hash: Some(secret_hash.to_string()),
             p2p_name: Some(name.to_string()),
+            group: None,
+            group_key_hash: None,
+            health_check: None,
         })
         .await?;
 

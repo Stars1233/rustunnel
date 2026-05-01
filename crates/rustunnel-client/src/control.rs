@@ -303,6 +303,10 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 local_addr,
                 p2p_secret_hash: tunnel.p2p_secret_hash.clone(),
                 p2p_name: tunnel.p2p_name.clone(),
+                // Load-balancing fields are wired up in Phase 2/4 (TUNNEL-7).
+                group: None,
+                group_key_hash: None,
+                health_check: None,
             },
         )
         .await?;
