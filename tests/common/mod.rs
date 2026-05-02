@@ -198,6 +198,31 @@ impl TestServer {
         .await
     }
 
+    /// Start a server with the TUNNEL-7 load-balancing kill switch on.
+    /// Used by the Phase 2 / Phase 3 group integration tests.
+    pub async fn start_with_load_balancing() -> Self {
+        let control_port = free_port();
+        let http_port = free_port();
+        let https_port = free_port();
+        let dashboard_port = free_port();
+        let tcp_low = alloc_tcp_port_range(10);
+        let tcp_high = tcp_low + 9;
+        let udp_low = alloc_tcp_port_range(10);
+        let udp_high = udp_low + 9;
+        Self::start_on_ports_with_load_balancing(
+            control_port,
+            http_port,
+            https_port,
+            dashboard_port,
+            [tcp_low, tcp_high],
+            [udp_low, udp_high],
+            true,
+            "integration-test-token",
+            true,
+        )
+        .await
+    }
+
     /// Start a server on specific pre-allocated ports.
     /// Used by reconnect tests to restart on the same port set.
     #[allow(clippy::too_many_arguments)]
@@ -210,6 +235,36 @@ impl TestServer {
         udp_port_range: [u16; 2],
         require_auth: bool,
         admin_token: &str,
+    ) -> Self {
+        Self::start_on_ports_with_load_balancing(
+            control_port,
+            http_port,
+            https_port,
+            dashboard_port,
+            tcp_port_range,
+            udp_port_range,
+            require_auth,
+            admin_token,
+            false,
+        )
+        .await
+    }
+
+    /// Most-flexible entry point: caller sets every port + the load-balancing
+    /// kill switch. Existing callers go through `start_on_ports` (which
+    /// defaults `load_balancing.enabled` to `false`); only the Phase 2 group
+    /// tests flip it on.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_on_ports_with_load_balancing(
+        control_port: u16,
+        http_port: u16,
+        https_port: u16,
+        dashboard_port: u16,
+        tcp_port_range: [u16; 2],
+        udp_port_range: [u16; 2],
+        require_auth: bool,
+        admin_token: &str,
+        load_balancing_enabled: bool,
     ) -> Self {
         let [tcp_low, tcp_high] = tcp_port_range;
 
@@ -271,7 +326,9 @@ impl TestServer {
                 enabled: true,
                 ..rustunnel_server::config::P2pSection::default()
             },
-            load_balancing: rustunnel_server::config::LoadBalancingSection::default(),
+            load_balancing: rustunnel_server::config::LoadBalancingSection {
+                enabled: load_balancing_enabled,
+            },
         });
 
         // Database.
@@ -506,6 +563,48 @@ impl TestClient {
     }
 
     // ── tunnel registration ───────────────────────────────────────────────────
+
+    /// Register an HTTP tunnel as part of a load-balancing group.
+    /// Phase 2 of TUNNEL-7. The server only honours the group fields when
+    /// `[load_balancing] enabled = true`. Returns `(tunnel_id, subdomain, public_url)`.
+    pub async fn register_http_tunnel_grouped(
+        &mut self,
+        subdomain: Option<&str>,
+        group_name: &str,
+        group_key_hash: &str,
+    ) -> Result<(Uuid, String, String), String> {
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::RegisterTunnel {
+            request_id: req_id.clone(),
+            protocol: TunnelProtocol::Http,
+            subdomain: subdomain.map(str::to_string),
+            local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: None,
+            p2p_name: None,
+            group: Some(group_name.to_string()),
+            group_key_hash: Some(group_key_hash.to_string()),
+            health_check: None,
+        })
+        .await?;
+
+        match self.recv_timeout(Duration::from_secs(5)).await? {
+            ControlFrame::TunnelRegistered {
+                tunnel_id,
+                public_url,
+                ..
+            } => {
+                let sub = public_url
+                    .trim_start_matches("http://")
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                Ok((tunnel_id, sub, public_url))
+            }
+            ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
+    }
 
     /// Register an HTTP tunnel.  Returns `(tunnel_id, subdomain, public_url)`.
     pub async fn register_http_tunnel(
