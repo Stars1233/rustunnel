@@ -14,6 +14,8 @@ export interface Tunnel {
   public_url: string;
   connected_since: string;
   request_count: number;
+  /** Total bytes proxied through this tunnel (TUNNEL-8 Phase 5). */
+  bytes_proxied: number;
   client_addr: string;
   /** Region ID of the server hosting this tunnel (e.g. "eu", "us"). */
   region_id: string;
@@ -21,6 +23,52 @@ export interface Tunnel {
   nat_type?: string;
   /** Public mapped addresses from STUN probing (P2P tunnels only). */
   mapped_addrs?: string[];
+  /** Group identity when this tunnel is part of a load-balancing pool. */
+  group?: TunnelGroupRef;
+  /** Current health bit. `true` for tunnels without a configured probe. */
+  healthy: boolean;
+  /** Current consecutive-failure streak from client probes. Resets on healthy. */
+  consecutive_failures: number;
+  /** Cumulative `TunnelUnhealthy` frames received for this member. */
+  total_health_failures: number;
+}
+
+/** Lightweight group identity attached to a single Tunnel. */
+export interface TunnelGroupRef {
+  name: string;
+  /** First 8 hex chars of the group's SHA-256 key hash. */
+  key_hash_short: string;
+  member_count: number;
+  healthy_count: number;
+}
+
+/** One row from `GET /api/groups`. */
+export interface TunnelGroup {
+  protocol: string;
+  label: string;
+  name: string;
+  key_hash_short: string;
+  region_id: string;
+  member_count: number;
+  healthy_count: number;
+  unhealthy_count: number;
+  total_dispatches: number;
+  total_health_failures: number;
+  members: TunnelGroupMember[];
+}
+
+export interface TunnelGroupMember {
+  tunnel_id: string;
+  session_id: string;
+  client_addr: string;
+  request_count: number;
+  bytes_proxied: number;
+  healthy: boolean;
+  consecutive_failures: number;
+  total_health_failures: number;
+  connected_since: string;
+  /** Probe type when the member opted into health checks (`tcp` / `http`). */
+  health_check_kind?: string;
 }
 
 export interface CapturedRequest {

@@ -72,7 +72,7 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
       >
         <thead>
           <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--muted)' }}>
-            {['Protocol', 'Public URL', 'Region', 'Client', 'Connected', 'Requests', ''].map((h) => (
+            {['Protocol', 'Public URL', 'Group', 'Region', 'Client', 'Connected', 'Requests', ''].map((h) => (
               <th
                 key={h}
                 style={{
@@ -129,6 +129,30 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
                       {t.nat_type}
                     </span>
                   )}
+                  {/*
+                    Health pill — only shown for grouped members. Solo
+                    tunnels are always healthy by definition; rendering the
+                    pill on every row would just be noise. (TUNNEL-8 Phase 5)
+                  */}
+                  {t.group && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 600,
+                        padding: '1px 6px',
+                        borderRadius: 8,
+                        color: t.healthy ? 'var(--accent)' : '#ff8b6b',
+                        background: t.healthy ? 'var(--accent-dim)' : 'rgba(255, 139, 107, 0.15)',
+                      }}
+                      title={
+                        t.healthy
+                          ? 'Receiving dispatched connections'
+                          : `Excluded from dispatch — ${t.consecutive_failures} consecutive probe failures`
+                      }
+                    >
+                      {t.healthy ? 'HEALTHY' : 'UNHEALTHY'}
+                    </span>
+                  )}
                 </td>
                 <td style={{ padding: '10px 14px', color: 'var(--accent)', maxWidth: 260 }}>
                   <span
@@ -141,6 +165,25 @@ export function TunnelTable({ tunnels, selected, onSelect, onClose }: TunnelTabl
                   >
                     {t.public_url}
                   </span>
+                </td>
+                <td style={{ padding: '10px 14px' }}>
+                  {t.group ? (
+                    <span
+                      style={{
+                        fontFamily: 'var(--mono)',
+                        fontSize: 11,
+                        color: 'var(--accent)',
+                        background: 'var(--accent-dim)',
+                        padding: '1px 5px',
+                        borderRadius: 3,
+                      }}
+                      title={`Group "${t.group.name}" — ${t.group.healthy_count}/${t.group.member_count} healthy member(s) (key ${t.group.key_hash_short})`}
+                    >
+                      {t.group.name} · {t.group.healthy_count}/{t.group.member_count}
+                    </span>
+                  ) : (
+                    <span style={{ color: 'var(--muted)' }}>—</span>
+                  )}
                 </td>
                 <td style={{ padding: '10px 14px' }}>
                   <span

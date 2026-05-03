@@ -71,6 +71,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tunnels/:id", delete(force_close_tunnel))
         .route("/api/tunnels/:id/requests", get(tunnel_requests))
         .route("/api/tunnels/:id/replay/:request_id", post(replay_request))
+        .route("/api/groups", get(list_groups))
         .route("/api/tokens", get(list_tokens).post(create_token))
         .route("/api/tokens/:id", delete(delete_token))
         .route("/api/history", get(tunnel_history))
@@ -231,6 +232,8 @@ struct TunnelSummary {
     connected_since: String,
     /// Total proxied requests / connections through this tunnel.
     request_count: u64,
+    /// Total bytes proxied through this tunnel (TUNNEL-8 Phase 5).
+    bytes_proxied: u64,
     /// Remote address of the client that owns this tunnel.
     client_addr: String,
     /// Region ID of the server hosting this tunnel (e.g. "eu", "us").
@@ -241,6 +244,36 @@ struct TunnelSummary {
     /// Public mapped addresses from STUN probing (P2P tunnels only).
     #[serde(skip_serializing_if = "Option::is_none")]
     mapped_addrs: Option<Vec<String>>,
+    /// Group identity when this tunnel is part of a load-balancing pool
+    /// (TUNNEL-8 Phase 5). `None` for solo tunnels — the dashboard shows
+    /// those exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<GroupRef>,
+    /// Current health bit. Always `true` for tunnels without a configured
+    /// `health_check`. `false` here means the dispatch path is currently
+    /// excluding this member.
+    healthy: bool,
+    /// Current consecutive-failure streak from client probes; resets on
+    /// each `TunnelHealthy`. `0` for tunnels without a probe configured.
+    consecutive_failures: u32,
+    /// Cumulative `TunnelUnhealthy` frames received for this member.
+    /// Same series as `rustunnel_group_health_failures_total` per-member.
+    total_health_failures: u64,
+}
+
+/// Group identity attached to a single tunnel summary.
+#[derive(Serialize, Clone)]
+struct GroupRef {
+    /// User-supplied display name (`group:` field on the client config).
+    name: String,
+    /// First 8 hex chars of the group's `key_hash`. Lets dashboards
+    /// distinguish two pools with the same name + key without exposing
+    /// the full hash. Empty for solo tunnels.
+    key_hash_short: String,
+    /// Total members in the group (including this one).
+    member_count: usize,
+    /// Members of the group that are currently healthy.
+    healthy_count: usize,
 }
 
 /// Convert an `Instant` recorded at tunnel creation into an ISO-8601 UTC string.
@@ -266,81 +299,56 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
 
     let mut tunnels: Vec<TunnelSummary> = Vec::new();
 
-    // One row per member. For Phase 1 every group has a single member, so
-    // the row shape is unchanged from before. Phase 5 of TUNNEL-7 will add
-    // group-aware fields (member_count, healthy pill, etc.) on top.
+    // One row per member. Solo tunnels (Phase 1 case) render exactly as
+    // before — `group` is `None`, `healthy` is `true`, the failure counters
+    // are 0. Group members get the full `GroupRef`, the actual health bit,
+    // and per-member failure counters so the dashboard can show "this
+    // backend is currently down on its 3rd straight probe failure".
     for entry in state.core.http_routes.iter() {
         let subdomain = entry.key().clone();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            tunnels.push(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "http".into(),
-                label: subdomain.clone(),
-                public_url: format!("https://{subdomain}"),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            });
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            tunnels.push(member_to_summary(
+                &member,
+                "http",
+                subdomain.clone(),
+                format!("https://{subdomain}"),
+                &state,
+                group_ref.clone(),
+            ));
         }
     }
 
     for entry in state.core.tcp_routes.iter() {
         let port = *entry.key();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            tunnels.push(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "tcp".into(),
-                label: port.to_string(),
-                public_url: format!("tcp://:{port}"),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            });
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            tunnels.push(member_to_summary(
+                &member,
+                "tcp",
+                port.to_string(),
+                format!("tcp://:{port}"),
+                &state,
+                group_ref.clone(),
+            ));
         }
     }
 
     for entry in state.core.udp_routes.iter() {
         let port = *entry.key();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            let client_addr = state
-                .core
-                .sessions
-                .get(&info.session_id)
-                .map(|s| s.client_addr.to_string())
-                .unwrap_or_default();
-            tunnels.push(TunnelSummary {
-                tunnel_id: info.tunnel_id.to_string(),
-                protocol: "udp".into(),
-                label: port.to_string(),
-                public_url: format!("udp://:{port}"),
-                connected_since: instant_to_iso(info.created_at),
-                request_count: info.request_count.load(Ordering::Relaxed),
-                client_addr,
-                region_id: state.region.id.clone(),
-                nat_type: None,
-                mapped_addrs: None,
-            });
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            tunnels.push(member_to_summary(
+                &member,
+                "udp",
+                port.to_string(),
+                format!("udp://:{port}"),
+                &state,
+                group_ref.clone(),
+            ));
         }
     }
 
@@ -360,6 +368,7 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             public_url: format!("p2p://{}", publisher.name),
             connected_since: instant_to_iso(info.created_at),
             request_count: info.request_count.load(Ordering::Relaxed),
+            bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
             client_addr,
             region_id: state.region.id.clone(),
             nat_type: publisher.nat_type.clone(),
@@ -368,10 +377,71 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
             } else {
                 Some(publisher.mapped_addrs.clone())
             },
+            // P2P tunnels don't participate in load-balancing groups.
+            group: None,
+            healthy: true,
+            consecutive_failures: 0,
+            total_health_failures: 0,
         });
     }
 
     Json(tunnels).into_response()
+}
+
+// ── helpers shared between /api/tunnels and /api/groups ──────────────────────
+
+/// Build a `GroupRef` for a routing entry. Returns `None` for solo
+/// (ungrouped) routes; their `TunnelSummary.group` stays `None` and the
+/// dashboard renders them exactly as before TUNNEL-8.
+fn group_summary_ref(group: &Arc<crate::core::TunnelGroup>) -> Option<GroupRef> {
+    let key_hash = group.key_hash.as_deref()?;
+    let healthy_count = group
+        .members
+        .iter()
+        .filter(|m| m.healthy.load(Ordering::Acquire))
+        .count();
+    Some(GroupRef {
+        name: group.name.clone(),
+        key_hash_short: key_hash.chars().take(8).collect(),
+        member_count: group.members.len(),
+        healthy_count,
+    })
+}
+
+/// Build a `TunnelSummary` for a single group member. Used by both
+/// `/api/tunnels` and `/api/groups`.
+fn member_to_summary(
+    member: &crate::core::GroupMember,
+    protocol: &str,
+    label: String,
+    public_url: String,
+    state: &ApiState,
+    group: Option<GroupRef>,
+) -> TunnelSummary {
+    let info = &member.info;
+    let client_addr = state
+        .core
+        .sessions
+        .get(&info.session_id)
+        .map(|s| s.client_addr.to_string())
+        .unwrap_or_default();
+    TunnelSummary {
+        tunnel_id: info.tunnel_id.to_string(),
+        protocol: protocol.to_string(),
+        label,
+        public_url,
+        connected_since: instant_to_iso(info.created_at),
+        request_count: info.request_count.load(Ordering::Relaxed),
+        bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+        client_addr,
+        region_id: state.region.id.clone(),
+        nat_type: None,
+        mapped_addrs: None,
+        group,
+        healthy: member.healthy.load(Ordering::Acquire),
+        consecutive_failures: member.consecutive_failures.load(Ordering::Acquire),
+        total_health_failures: member.total_health_failures.load(Ordering::Relaxed),
+    }
 }
 
 async fn force_close_tunnel(
@@ -404,27 +474,18 @@ async fn get_tunnel(
     // Search HTTP routes first.
     for entry in state.core.http_routes.iter() {
         let subdomain = entry.key().clone();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            if info.tunnel_id.to_string() == id {
-                let client_addr = state
-                    .core
-                    .sessions
-                    .get(&info.session_id)
-                    .map(|s| s.client_addr.to_string())
-                    .unwrap_or_default();
-                return Json(TunnelSummary {
-                    tunnel_id: info.tunnel_id.to_string(),
-                    protocol: "http".into(),
-                    label: subdomain.clone(),
-                    public_url: format!("https://{subdomain}"),
-                    connected_since: instant_to_iso(info.created_at),
-                    request_count: info.request_count.load(Ordering::Relaxed),
-                    client_addr,
-                    region_id: state.region.id.clone(),
-                    nat_type: None,
-                    mapped_addrs: None,
-                })
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            if member.info.tunnel_id.to_string() == id {
+                return Json(member_to_summary(
+                    &member,
+                    "http",
+                    subdomain.clone(),
+                    format!("https://{subdomain}"),
+                    &state,
+                    group_ref.clone(),
+                ))
                 .into_response();
             }
         }
@@ -433,27 +494,18 @@ async fn get_tunnel(
     // Then TCP routes.
     for entry in state.core.tcp_routes.iter() {
         let port = *entry.key();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            if info.tunnel_id.to_string() == id {
-                let client_addr = state
-                    .core
-                    .sessions
-                    .get(&info.session_id)
-                    .map(|s| s.client_addr.to_string())
-                    .unwrap_or_default();
-                return Json(TunnelSummary {
-                    tunnel_id: info.tunnel_id.to_string(),
-                    protocol: "tcp".into(),
-                    label: port.to_string(),
-                    public_url: format!("tcp://:{port}"),
-                    connected_since: instant_to_iso(info.created_at),
-                    request_count: info.request_count.load(Ordering::Relaxed),
-                    client_addr,
-                    region_id: state.region.id.clone(),
-                    nat_type: None,
-                    mapped_addrs: None,
-                })
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            if member.info.tunnel_id.to_string() == id {
+                return Json(member_to_summary(
+                    &member,
+                    "tcp",
+                    port.to_string(),
+                    format!("tcp://:{port}"),
+                    &state,
+                    group_ref.clone(),
+                ))
                 .into_response();
             }
         }
@@ -462,27 +514,18 @@ async fn get_tunnel(
     // Then UDP routes.
     for entry in state.core.udp_routes.iter() {
         let port = *entry.key();
-        for member in entry.value().members.iter() {
-            let info = &member.info;
-            if info.tunnel_id.to_string() == id {
-                let client_addr = state
-                    .core
-                    .sessions
-                    .get(&info.session_id)
-                    .map(|s| s.client_addr.to_string())
-                    .unwrap_or_default();
-                return Json(TunnelSummary {
-                    tunnel_id: info.tunnel_id.to_string(),
-                    protocol: "udp".into(),
-                    label: port.to_string(),
-                    public_url: format!("udp://:{port}"),
-                    connected_since: instant_to_iso(info.created_at),
-                    request_count: info.request_count.load(Ordering::Relaxed),
-                    client_addr,
-                    region_id: state.region.id.clone(),
-                    nat_type: None,
-                    mapped_addrs: None,
-                })
+        let group_arc = entry.value();
+        let group_ref = group_summary_ref(group_arc);
+        for member in group_arc.members.iter() {
+            if member.info.tunnel_id.to_string() == id {
+                return Json(member_to_summary(
+                    &member,
+                    "udp",
+                    port.to_string(),
+                    format!("udp://:{port}"),
+                    &state,
+                    group_ref.clone(),
+                ))
                 .into_response();
             }
         }
@@ -506,6 +549,7 @@ async fn get_tunnel(
                 public_url: format!("p2p://{}", publisher.name),
                 connected_since: instant_to_iso(info.created_at),
                 request_count: info.request_count.load(Ordering::Relaxed),
+                bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
                 client_addr,
                 region_id: state.region.id.clone(),
                 nat_type: publisher.nat_type.clone(),
@@ -514,12 +558,169 @@ async fn get_tunnel(
                 } else {
                     Some(publisher.mapped_addrs.clone())
                 },
+                group: None,
+                healthy: true,
+                consecutive_failures: 0,
+                total_health_failures: 0,
             })
             .into_response();
         }
     }
 
     not_found("tunnel not found").into_response()
+}
+
+// ── load-balancing groups (TUNNEL-8 Phase 5) ────────────────────────────────
+
+/// One member's contribution inside a `GroupSummary` row. Subset of
+/// `TunnelSummary` — just the fields needed for the dashboard's
+/// per-member breakdown of a group.
+#[derive(Serialize)]
+struct GroupMemberSummary {
+    tunnel_id: String,
+    session_id: String,
+    client_addr: String,
+    request_count: u64,
+    bytes_proxied: u64,
+    healthy: bool,
+    consecutive_failures: u32,
+    total_health_failures: u64,
+    /// ISO-8601 UTC timestamp the member registered.
+    connected_since: String,
+    /// Probe type configured for this member (`tcp` / `http`), or `None`
+    /// when the member didn't opt into health checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health_check_kind: Option<String>,
+}
+
+/// One row per active multi-member group across HTTP and TCP.
+///
+/// Solo (ungrouped) tunnels are NOT returned by this endpoint — they
+/// already show up in `/api/tunnels` and don't have a group identity to
+/// surface. To list everything, the dashboard joins this endpoint with
+/// `/api/tunnels` on the client side.
+#[derive(Serialize)]
+struct GroupSummary {
+    /// `http` / `tcp`. UDP and P2P don't support groups today.
+    protocol: String,
+    /// Routing key — the subdomain for HTTP, port-as-string for TCP.
+    label: String,
+    /// User-supplied display name from `RegisterTunnel.group`.
+    name: String,
+    /// First 8 hex chars of the SHA-256 key hash. Stable identity across
+    /// reconnects so a single group can be tracked across churn.
+    key_hash_short: String,
+    region_id: String,
+    member_count: usize,
+    healthy_count: usize,
+    unhealthy_count: usize,
+    /// Sum of `request_count` across the group's members.
+    total_dispatches: u64,
+    /// Sum of `total_health_failures` across the group's members.
+    total_health_failures: u64,
+    members: Vec<GroupMemberSummary>,
+}
+
+async fn list_groups(headers: HeaderMap, State(state): State<ApiState>) -> impl IntoResponse {
+    if let Err(e) = require_auth(&headers, &state).await {
+        return e.into_response();
+    }
+
+    let mut groups: Vec<GroupSummary> = Vec::new();
+    let region = state.region.id.clone();
+
+    for entry in state.core.http_routes.iter() {
+        let group = entry.value();
+        if group.key_hash.is_none() {
+            continue; // solo registration — covered by /api/tunnels
+        }
+        groups.push(group_to_summary(
+            "http",
+            entry.key().clone(),
+            group,
+            &state.core,
+            &region,
+        ));
+    }
+
+    for entry in state.core.tcp_routes.iter() {
+        let group = entry.value();
+        if group.key_hash.is_none() {
+            continue;
+        }
+        groups.push(group_to_summary(
+            "tcp",
+            entry.key().to_string(),
+            group,
+            &state.core,
+            &region,
+        ));
+    }
+
+    Json(groups).into_response()
+}
+
+/// Build a `GroupSummary` for a single routing entry.
+fn group_to_summary(
+    protocol: &str,
+    label: String,
+    group: &Arc<crate::core::TunnelGroup>,
+    core: &Arc<crate::core::TunnelCore>,
+    region_id: &str,
+) -> GroupSummary {
+    let key_hash = group.key_hash.as_deref().unwrap_or("");
+    let mut healthy_count = 0;
+    let mut unhealthy_count = 0;
+    let mut total_dispatches: u64 = 0;
+    let mut total_health_failures: u64 = 0;
+    let mut members = Vec::with_capacity(group.members.len());
+    for m in group.members.iter() {
+        let info = &m.info;
+        let healthy = m.healthy.load(Ordering::Acquire);
+        if healthy {
+            healthy_count += 1;
+        } else {
+            unhealthy_count += 1;
+        }
+        let req_count = info.request_count.load(Ordering::Relaxed);
+        let failures = m.total_health_failures.load(Ordering::Relaxed);
+        total_dispatches += req_count;
+        total_health_failures += failures;
+        let client_addr = core
+            .sessions
+            .get(&info.session_id)
+            .map(|s| s.client_addr.to_string())
+            .unwrap_or_default();
+        let health_check_kind = m.health_spec.as_ref().map(|s| match s.kind {
+            rustunnel_protocol::HealthCheckKind::Tcp => "tcp".to_string(),
+            rustunnel_protocol::HealthCheckKind::Http => "http".to_string(),
+        });
+        members.push(GroupMemberSummary {
+            tunnel_id: info.tunnel_id.to_string(),
+            session_id: info.session_id.to_string(),
+            client_addr,
+            request_count: req_count,
+            bytes_proxied: info.bytes_proxied.load(Ordering::Relaxed),
+            healthy,
+            consecutive_failures: m.consecutive_failures.load(Ordering::Acquire),
+            total_health_failures: failures,
+            connected_since: instant_to_iso(info.created_at),
+            health_check_kind,
+        });
+    }
+    GroupSummary {
+        protocol: protocol.to_string(),
+        label,
+        name: group.name.clone(),
+        key_hash_short: key_hash.chars().take(8).collect(),
+        region_id: region_id.to_string(),
+        member_count: group.members.len(),
+        healthy_count,
+        unhealthy_count,
+        total_dispatches,
+        total_health_failures,
+        members,
+    }
 }
 
 // ── captured requests ─────────────────────────────────────────────────────────
