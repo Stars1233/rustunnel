@@ -16,6 +16,7 @@ mod proxy;
 mod reconnect;
 mod regions;
 mod stun;
+mod version;
 
 use std::path::PathBuf;
 
