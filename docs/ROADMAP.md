@@ -48,9 +48,19 @@ This document tracks the features that have already shipped and ideas planned fo
 - [x] Append-only audit log (JSON-lines) for auth, tunnel, and token events
 - [x] Prometheus metrics endpoint (`/metrics` on `:9090`)
   - `rustunnel_active_sessions`
-  - `rustunnel_active_tunnels_http`
-  - `rustunnel_active_tunnels_tcp`
+  - `rustunnel_active_tunnels_http` / `_tcp` / `_udp` / `_p2p`
+  - `rustunnel_bytes_proxied_total`, `rustunnel_requests_total`
+  - `rustunnel_group_members{group, region, healthy}` (load balancing — TUNNEL-8)
+  - `rustunnel_group_dispatches_total{group, region}`
+  - `rustunnel_group_health_failures_total{group, region, kind}`
 - [x] SQLite-backed tunnel activity log (`tunnel_log` table with token attribution)
+
+### Load balancing & health checks (TUNNEL-8 — shipped in v0.7.0)
+- [x] Group-based load balancing for HTTP and TCP tunnels — multiple clients sharing the same `(subdomain, group_key)` (HTTP) or `(group_name, group_key)` (TCP) form a load-balanced pool with random dispatch across healthy members
+- [x] Client-side TCP and HTTP health probes — `interval_secs` / `timeout_secs` / `max_failed` per FRP's `healthCheck` config; sick backends automatically removed from rotation via `TunnelHealthy` / `TunnelUnhealthy` frames
+- [x] Per-region kill switch (`[load_balancing] enabled` in `server.toml`) for safe rollout
+- [x] Wire-compatible across versions — older clients register as solo, newer clients version-gate the new frames so they don't trip `decode_frame` on older edges
+- [x] Public docs at [`reference/load-balancing`](https://docs.rustunnel.com/reference/load-balancing) and the [client guide multi-backends section](https://docs.rustunnel.com/guides/client-guide#multiple-backends-load-balancing)
 
 ### Deployment
 - [x] Multi-stage Dockerfile for minimal production images
@@ -146,7 +156,7 @@ Items below are not committed to any release timeline. They represent directions
 - [ ] Windows support for the client binary
 - [ ] Config file hot-reload (SIGHUP) without restarting the server
 - [ ] Health check / heartbeat endpoint for load balancer probing
-- [ ] Group-based load balancing across multiple backends — multiple clients register against the same HTTP subdomain or TCP port under a shared group + group key, and inbound connections are dispatched at random to a healthy member. Includes built-in TCP and HTTP health checks (interval / timeout / max-failed) so unhealthy backends are removed from the pool automatically. Modeled on FRP's `loadBalancer.group` / `healthCheck` config; see [TUNNEL-7]
+- ~~Group-based load balancing across multiple backends~~ — **shipped in v0.7.0** under TUNNEL-8; see the new [Load balancing & health checks](#load-balancing--health-checks-tunnel-8--shipped-in-v070) section above
 
 ### Multi-region (Phase 5 — unified dashboard) ✅ Complete
 - [x] Dashboard fan-out queries — active tunnels aggregated across all regions via parallel API calls

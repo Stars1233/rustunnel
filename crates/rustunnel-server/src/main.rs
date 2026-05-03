@@ -256,8 +256,9 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
 
     let h_metrics = {
         let core = Arc::clone(&core);
+        let region = config.region.id.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_metrics(metrics_addr, core).await {
+            if let Err(e) = run_metrics(metrics_addr, core, region).await {
                 error!("metrics server exited: {e}");
             }
         })
@@ -319,10 +320,38 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
 
 // ── Prometheus metrics endpoint ───────────────────────────────────────────────
 
-async fn run_metrics(addr: SocketAddr, core: Arc<TunnelCore>) -> Result<()> {
+/// State for the metrics endpoint: the routing tables plus the region id
+/// (used as a Prometheus label so a central scraper can distinguish series
+/// from EU / US / AP).
+#[derive(Clone)]
+struct MetricsState {
+    core: Arc<TunnelCore>,
+    region: String,
+}
+
+/// Escape a label value per the Prometheus exposition format:
+/// backslashes, double-quotes, and newlines are the only forbidden
+/// characters inside `"..."`. We don't expect any of these in real
+/// region/group names but defensive-encoding keeps malformed config
+/// from breaking the scrape.
+fn escape_prometheus_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+async fn run_metrics(addr: SocketAddr, core: Arc<TunnelCore>, region: String) -> Result<()> {
+    let state = MetricsState { core, region };
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(core);
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "metrics endpoint listening");
@@ -330,13 +359,15 @@ async fn run_metrics(addr: SocketAddr, core: Arc<TunnelCore>) -> Result<()> {
     Ok(())
 }
 
-async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
+async fn metrics_handler(State(state): State<MetricsState>) -> Response {
     use std::sync::atomic::Ordering;
+    let core = &state.core;
+    let region_label = escape_prometheus_label(&state.region);
 
     let sessions = core.sessions.len();
     // Existing gauges count *members* (i.e. registered tunnels) so the
-    // numbers stay comparable with pre-load-balancing data. Phase 5 will add
-    // separate `rustunnel_group_members{...}` metrics keyed by group.
+    // numbers stay comparable with pre-load-balancing data. Phase 5 layers
+    // separate `rustunnel_group_*` series on top, keyed by group identity.
     let http_tunnels: usize = core.http_routes.iter().map(|g| g.members.len()).sum();
     let tcp_tunnels: usize = core.tcp_routes.iter().map(|g| g.members.len()).sum();
     let udp_tunnels: usize = core.udp_routes.iter().map(|g| g.members.len()).sum();
@@ -374,6 +405,94 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
             .load(std::sync::atomic::Ordering::Relaxed);
     }
 
+    // ── Phase 5: per-group series ────────────────────────────────────────
+    //
+    // For each grouped (key_hash.is_some()) routing entry across HTTP and
+    // TCP, emit:
+    //   - `rustunnel_group_members{group, region, healthy="true|false"}` —
+    //     gauge of currently-registered members partitioned by health bit.
+    //   - `rustunnel_group_dispatches_total{group, region}` — sum of
+    //     per-member request counts. Per-group, *not* per-member, to keep
+    //     the label cardinality bounded against UUID churn (see plan §7).
+    //   - `rustunnel_group_health_failures_total{group, region, kind}` —
+    //     sum of `total_health_failures` across members; `kind` is the
+    //     probe type (tcp/http) drawn from the first member's spec.
+    //
+    // Solo (ungrouped) registrations are skipped — those still show up in
+    // the existing `rustunnel_active_tunnels_*` gauges and
+    // `rustunnel_requests_total` counter.
+    let mut groups_block = String::new();
+    groups_block.push_str(
+        "# HELP rustunnel_group_members Number of registered group members partitioned by healthy state\n\
+         # TYPE rustunnel_group_members gauge\n\
+         # HELP rustunnel_group_dispatches_total Total dispatched connections across all members of a group\n\
+         # TYPE rustunnel_group_dispatches_total counter\n\
+         # HELP rustunnel_group_health_failures_total Total TunnelUnhealthy frames received across the group's members\n\
+         # TYPE rustunnel_group_health_failures_total counter\n",
+    );
+
+    let mut emit_group = |routes_iter: Box<
+        dyn Iterator<Item = (String, Arc<rustunnel_server::core::TunnelGroup>)> + '_,
+    >| {
+        for (_route_key, group) in routes_iter {
+            if group.key_hash.is_none() {
+                continue; // solo / ungrouped — covered by the legacy gauges
+            }
+            let group_label = escape_prometheus_label(&group.name);
+            let mut healthy = 0u64;
+            let mut unhealthy = 0u64;
+            let mut dispatches = 0u64;
+            let mut failures = 0u64;
+            let mut probe_kind: Option<&'static str> = None;
+            for member in group.members.iter() {
+                if member.healthy.load(Ordering::Acquire) {
+                    healthy += 1;
+                } else {
+                    unhealthy += 1;
+                }
+                dispatches += member.info.request_count.load(Ordering::Relaxed);
+                failures += member.total_health_failures.load(Ordering::Relaxed);
+                if probe_kind.is_none() {
+                    probe_kind = member.health_spec.as_ref().map(|s| match s.kind {
+                        rustunnel_protocol::HealthCheckKind::Tcp => "tcp",
+                        rustunnel_protocol::HealthCheckKind::Http => "http",
+                    });
+                }
+            }
+            use std::fmt::Write;
+            let _ = writeln!(
+                groups_block,
+                "rustunnel_group_members{{group=\"{group_label}\",region=\"{region_label}\",healthy=\"true\"}} {healthy}"
+            );
+            let _ = writeln!(
+                groups_block,
+                "rustunnel_group_members{{group=\"{group_label}\",region=\"{region_label}\",healthy=\"false\"}} {unhealthy}"
+            );
+            let _ = writeln!(
+                groups_block,
+                "rustunnel_group_dispatches_total{{group=\"{group_label}\",region=\"{region_label}\"}} {dispatches}"
+            );
+            // `kind` defaults to "none" when no member has opted into probes
+            // — that's a meaningful case operators may want to filter on
+            // (e.g. "groups with health checks vs without").
+            let kind = probe_kind.unwrap_or("none");
+            let _ = writeln!(
+                groups_block,
+                "rustunnel_group_health_failures_total{{group=\"{group_label}\",region=\"{region_label}\",kind=\"{kind}\"}} {failures}"
+            );
+        }
+    };
+    emit_group(Box::new(
+        core.http_routes
+            .iter()
+            .map(|e| (e.key().clone(), Arc::clone(e.value()))),
+    ));
+    emit_group(Box::new(
+        core.tcp_routes
+            .iter()
+            .map(|e| (e.key().to_string(), Arc::clone(e.value()))),
+    ));
+
     let body = format!(
         "# HELP rustunnel_active_sessions Number of active client sessions\n\
          # TYPE rustunnel_active_sessions gauge\n\
@@ -395,7 +514,8 @@ async fn metrics_handler(State(core): State<Arc<TunnelCore>>) -> Response {
          rustunnel_bytes_proxied_total {total_bytes}\n\
          # HELP rustunnel_requests_total Total requests/connections across all tunnels\n\
          # TYPE rustunnel_requests_total counter\n\
-         rustunnel_requests_total {total_requests}\n"
+         rustunnel_requests_total {total_requests}\n\
+         {groups_block}"
     );
 
     Response::builder()
