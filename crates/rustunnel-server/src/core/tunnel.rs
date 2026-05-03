@@ -90,10 +90,16 @@ pub struct GroupMember {
     /// Health-check spec from `RegisterTunnel.health_check`; `None` if the
     /// client didn't ask for probes.
     pub health_spec: Option<HealthCheckSpec>,
-    /// Tracked server-side for surfacing on the dashboard. Probe failures are
-    /// detected on the client; this counter is incremented on each
-    /// `TunnelUnhealthy` frame.
+    /// Current consecutive-failure streak — resets to 0 each time a
+    /// `TunnelHealthy` arrives. Surfaced on the dashboard so operators can
+    /// see "this member is currently down on its 3rd straight failure".
     pub consecutive_failures: AtomicU32,
+    /// Cumulative count of `TunnelUnhealthy` frames received since this
+    /// member registered. Drives the
+    /// `rustunnel_group_health_failures_total{group, kind}` Prometheus
+    /// counter (Phase 5). Never resets while the member is registered;
+    /// goes away when the member leaves the group.
+    pub total_health_failures: AtomicU64,
 }
 
 impl GroupMember {
@@ -105,6 +111,7 @@ impl GroupMember {
             healthy: AtomicBool::new(true),
             health_spec: None,
             consecutive_failures: AtomicU32::new(0),
+            total_health_failures: AtomicU64::new(0),
         }
     }
 
@@ -122,6 +129,7 @@ impl GroupMember {
             healthy: AtomicBool::new(initially_healthy),
             health_spec: spec,
             consecutive_failures: AtomicU32::new(0),
+            total_health_failures: AtomicU64::new(0),
         }
     }
 }

@@ -740,13 +740,14 @@ impl TunnelCore {
         })
     }
 
-    /// Mark `tunnel_id` unhealthy and bump its consecutive-failure counter.
+    /// Mark `tunnel_id` unhealthy and bump its failure counters.
     /// `reason` is a free-form string from the client used for dashboards.
     /// Returns `true` if the tunnel was found and updated.
     pub fn set_tunnel_unhealthy(&self, tunnel_id: &Uuid, reason: &str) -> bool {
         self.with_member(tunnel_id, |member| {
             member.healthy.store(false, Ordering::Release);
             member.consecutive_failures.fetch_add(1, Ordering::Release);
+            member.total_health_failures.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%tunnel_id, %reason, "tunnel marked unhealthy");
         })
     }
