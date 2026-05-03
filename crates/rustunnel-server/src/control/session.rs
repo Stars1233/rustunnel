@@ -482,14 +482,54 @@ where
             local_addr: _,
             p2p_secret_hash,
             p2p_name,
-            // Phase 0: accept the new load-balancing fields on the wire so old
-            // clients keep working unchanged. Server-side handling lands in
-            // later phases of TUNNEL-7.
-            group: _,
-            group_key_hash: _,
-            health_check: _,
+            // TUNNEL-7 load-balancing inputs. Phase 0 accepted these silently;
+            // Phase 2 honours them for HTTP groups (TCP follows in Phase 3)
+            // when `[load_balancing] enabled = true` on this region.
+            group,
+            group_key_hash,
+            health_check,
         } => {
             tracing::debug!(%session_id, %request_id, ?protocol, "register tunnel");
+
+            // Build the per-tunnel GroupSpec for HTTP/TCP registration.
+            //
+            // Three guard clauses turn into None (= solo registration):
+            //   - The kill switch is off on this region.
+            //   - The client did not request a group.
+            //   - The client requested a group but didn't supply a key hash
+            //     (we never autogenerate one — the whole point is mutual auth).
+            //
+            // For the disabled-flag path we log so operators can see when
+            // grouped clients are being downgraded (matches the warning the
+            // *client* will eventually emit on a Phase-6 server-version probe).
+            let http_group_spec = match (
+                config.load_balancing.enabled,
+                group.as_ref(),
+                group_key_hash.as_ref(),
+            ) {
+                (true, Some(name), Some(hash)) => Some(crate::core::GroupSpec {
+                    group_name: name.clone(),
+                    key_hash: hash.clone(),
+                    health_check: health_check.clone(),
+                }),
+                (false, Some(name), _) => {
+                    tracing::warn!(
+                        %session_id, %request_id, group = %name,
+                        "client requested load-balancing group but [load_balancing] is disabled on this region; \
+                         registering as solo tunnel"
+                    );
+                    None
+                }
+                (true, Some(name), None) => {
+                    tracing::warn!(
+                        %session_id, %request_id, group = %name,
+                        "client requested load-balancing group without a key hash; \
+                         registering as solo tunnel"
+                    );
+                    None
+                }
+                _ => None,
+            };
 
             // ── Token limit enforcement ────────────────────────────────────
             // status is always checked; limit/expiry checks are skipped for
@@ -585,7 +625,12 @@ where
             let token_user_id = db_token.as_ref().and_then(|t| t.user_id);
             match &protocol {
                 TunnelProtocol::Http | TunnelProtocol::Https => {
-                    match core.register_http_tunnel(&session_id, subdomain, protocol.clone()) {
+                    match core.register_http_tunnel(
+                        &session_id,
+                        subdomain,
+                        protocol.clone(),
+                        http_group_spec,
+                    ) {
                         Ok((tunnel_id, sub)) => {
                             let scheme = if protocol == TunnelProtocol::Https {
                                 "https"

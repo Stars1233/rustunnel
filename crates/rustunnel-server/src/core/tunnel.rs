@@ -107,6 +107,23 @@ impl GroupMember {
             consecutive_failures: AtomicU32::new(0),
         }
     }
+
+    /// Create a member with an optional health-check spec.
+    ///
+    /// Initial `healthy` follows §4.5 of the plan: a member with no spec is
+    /// trusted (presence ⇒ healthy); a member that *did* opt into probes
+    /// starts unhealthy and only flips to healthy on the first
+    /// `TunnelHealthy` frame from the client. This prevents routing real
+    /// traffic to a backend whose upstream we haven't probed yet.
+    pub fn with_health_spec(info: TunnelInfo, spec: Option<HealthCheckSpec>) -> Self {
+        let initially_healthy = spec.is_none();
+        Self {
+            info,
+            healthy: AtomicBool::new(initially_healthy),
+            health_spec: spec,
+            consecutive_failures: AtomicU32::new(0),
+        }
+    }
 }
 
 /// A pool of one or more members serving the same subdomain or port.
@@ -134,6 +151,46 @@ impl TunnelGroup {
             .insert(info.tunnel_id, GroupMember::healthy_with(info));
         group
     }
+
+    /// Create a fresh group seeded with `member`. Phase 2 of TUNNEL-7 uses
+    /// this for the first registration of a multi-member HTTP group; Phase
+    /// 3 will reuse it for TCP. `key_hash` is `Some` for grouped pools and
+    /// `None` for ungrouped/solo registrations (use `new_solo` in that
+    /// case for clarity).
+    pub fn new_with_member(
+        name: String,
+        key_hash: Option<String>,
+        member: GroupMember,
+    ) -> Arc<Self> {
+        let tunnel_id = member.info.tunnel_id;
+        let group = Arc::new(Self {
+            name,
+            key_hash,
+            members: DashMap::new(),
+        });
+        group.members.insert(tunnel_id, member);
+        group
+    }
+}
+
+/// User-supplied parameters for joining or creating a load-balancing group.
+///
+/// Built by the session frame handler from `RegisterTunnel.group` /
+/// `RegisterTunnel.group_key_hash` / `RegisterTunnel.health_check` once the
+/// `[load_balancing] enabled = true` kill switch is on. Passed into
+/// `TunnelCore::register_http_tunnel` (Phase 2) and
+/// `register_tcp_tunnel` (Phase 3, future).
+#[derive(Debug, Clone)]
+pub struct GroupSpec {
+    /// User-supplied display name (sets `TunnelGroup.name` on the first
+    /// registration; subsequent joiners can supply any value, the existing
+    /// name wins — same as FRP).
+    pub group_name: String,
+    /// SHA-256 hash of the user-supplied `group_key`. Must match across
+    /// every member of the group.
+    pub key_hash: String,
+    /// Optional health-check spec for this member.
+    pub health_check: Option<HealthCheckSpec>,
 }
 
 // ── per-session state ─────────────────────────────────────────────────────────

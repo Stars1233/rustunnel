@@ -17,7 +17,8 @@ use crate::error::{Error, Result};
 use super::ip_limiter::IpRateLimiter;
 use super::limiter::RateLimiter;
 use super::tunnel::{
-    ControlMessage, SessionInfo, TcpTunnelEvent, TunnelGroup, TunnelInfo, UdpTunnelEvent,
+    ControlMessage, GroupMember, GroupSpec, SessionInfo, TcpTunnelEvent, TunnelGroup, TunnelInfo,
+    UdpTunnelEvent,
 };
 
 /// Broadcast channel capacity for TCP/UDP tunnel lifecycle events.
@@ -236,12 +237,26 @@ impl TunnelCore {
     /// If `subdomain` is `None` an 8-character random hex label is generated.
     /// User-supplied subdomains are validated: alphanumeric + hyphens only,
     /// 3–63 characters, no leading or trailing hyphens.
+    ///
+    /// When `group` is `None` (the only case before TUNNEL-7 Phase 2): the
+    /// subdomain is owned by exactly one tunnel, mirroring historical
+    /// behaviour. A duplicate subdomain registration is rejected.
+    ///
+    /// When `group` is `Some`: the subdomain becomes a load-balanced pool.
+    /// The first registration with a given `(subdomain, key_hash)` creates
+    /// the group; subsequent registrations join it iff their `key_hash`
+    /// matches and their `protocol` (Http/Https) matches the existing
+    /// members. A solo (no-group) registration on top of an existing group
+    /// — or a grouped registration on top of an existing solo — is
+    /// rejected. See plan §4.3.
+    ///
     /// Returns `(tunnel_id, public_subdomain)`.
     pub fn register_http_tunnel(
         &self,
         session_id: &Uuid,
         subdomain: Option<String>,
         protocol: TunnelProtocol,
+        group: Option<GroupSpec>,
     ) -> Result<(Uuid, String)> {
         self.check_session_limit(session_id)?;
 
@@ -253,18 +268,11 @@ impl TunnelCore {
             None => random_subdomain(),
         };
 
-        // Reject duplicate subdomain registrations.
-        if self.http_routes.contains_key(&subdomain) {
-            return Err(Error::Tunnel(format!(
-                "subdomain '{subdomain}' is already in use"
-            )));
-        }
-
         let tunnel_id = Uuid::new_v4();
         let info = TunnelInfo {
             session_id: *session_id,
             tunnel_id,
-            protocol,
+            protocol: protocol.clone(),
             subdomain: Some(subdomain.clone()),
             assigned_port: None,
             created_at: std::time::Instant::now(),
@@ -273,8 +281,62 @@ impl TunnelCore {
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
-        let group = TunnelGroup::new_solo(subdomain.clone(), info);
-        self.http_routes.insert(subdomain.clone(), group);
+        // Atomic upsert via the entry API — closes the get-then-insert race
+        // that two concurrent first-registrations could otherwise hit (plan
+        // §7 risk #4). The shard lock is held for the duration of this
+        // match block.
+        use dashmap::mapref::entry::Entry;
+        match self.http_routes.entry(subdomain.clone()) {
+            Entry::Vacant(vac) => {
+                let new_group = match group {
+                    None => TunnelGroup::new_solo(subdomain.clone(), info),
+                    Some(spec) => TunnelGroup::new_with_member(
+                        spec.group_name,
+                        Some(spec.key_hash),
+                        GroupMember::with_health_spec(info, spec.health_check),
+                    ),
+                };
+                vac.insert(new_group);
+            }
+            Entry::Occupied(occ) => {
+                let existing = occ.get();
+                let Some(spec) = group else {
+                    // Solo registration on a subdomain that's already
+                    // registered (solo or grouped) — historical behaviour.
+                    return Err(Error::Tunnel(format!(
+                        "subdomain '{subdomain}' is already in use"
+                    )));
+                };
+                // Grouped registration: existing must already be a group
+                // with a matching key.
+                let existing_key = existing.key_hash.as_deref();
+                if existing_key != Some(spec.key_hash.as_str()) {
+                    return Err(Error::Tunnel(format!(
+                        "group key does not match existing group for subdomain '{subdomain}'"
+                    )));
+                }
+                // Identity check: protocol (Http vs Https) must match the
+                // existing members. FRP enforces the same on
+                // customDomains/subdomain/locations; protocol is the only
+                // field where mismatch is meaningful for us.
+                let existing_protocol = existing
+                    .members
+                    .iter()
+                    .next()
+                    .map(|m| m.info.protocol.clone());
+                if existing_protocol.as_ref() != Some(&protocol) {
+                    return Err(Error::Tunnel(format!(
+                        "group member protocol mismatch for subdomain '{subdomain}': existing={:?}, new={:?}",
+                        existing_protocol, protocol,
+                    )));
+                }
+                existing.members.insert(
+                    tunnel_id,
+                    GroupMember::with_health_spec(info, spec.health_check),
+                );
+            }
+        }
+
         self.tunnel_index
             .insert(tunnel_id, TunnelKey::Http(subdomain.clone()));
         self.add_tunnel_to_session(session_id, tunnel_id);
@@ -730,7 +792,12 @@ mod tests {
         let (session_id, _rx) = dummy_session(&core);
 
         let (tunnel_id, subdomain) = core
-            .register_http_tunnel(&session_id, Some("myapp".to_string()), TunnelProtocol::Http)
+            .register_http_tunnel(
+                &session_id,
+                Some("myapp".to_string()),
+                TunnelProtocol::Http,
+                None,
+            )
             .unwrap();
 
         assert_eq!(subdomain, "myapp");
@@ -749,7 +816,7 @@ mod tests {
         let (session_id, _rx) = dummy_session(&core);
 
         let (_, subdomain) = core
-            .register_http_tunnel(&session_id, None, TunnelProtocol::Http)
+            .register_http_tunnel(&session_id, None, TunnelProtocol::Http, None)
             .unwrap();
 
         assert_eq!(subdomain.len(), 8);
@@ -761,11 +828,20 @@ mod tests {
         let core = make_core();
         let (session_id, _rx) = dummy_session(&core);
 
-        core.register_http_tunnel(&session_id, Some("clash".to_string()), TunnelProtocol::Http)
-            .unwrap();
+        core.register_http_tunnel(
+            &session_id,
+            Some("clash".to_string()),
+            TunnelProtocol::Http,
+            None,
+        )
+        .unwrap();
 
-        let result =
-            core.register_http_tunnel(&session_id, Some("clash".to_string()), TunnelProtocol::Http);
+        let result = core.register_http_tunnel(
+            &session_id,
+            Some("clash".to_string()),
+            TunnelProtocol::Http,
+            None,
+        );
 
         assert!(matches!(result, Err(Error::Tunnel(_))));
     }
@@ -776,7 +852,12 @@ mod tests {
         let (session_id, _rx) = dummy_session(&core);
 
         let (tunnel_id, _) = core
-            .register_http_tunnel(&session_id, Some("gone".to_string()), TunnelProtocol::Http)
+            .register_http_tunnel(
+                &session_id,
+                Some("gone".to_string()),
+                TunnelProtocol::Http,
+                None,
+            )
             .unwrap();
 
         core.remove_tunnel(&tunnel_id);
@@ -848,8 +929,13 @@ mod tests {
         let core = make_core();
         let (session_id, _rx) = dummy_session(&core);
 
-        core.register_http_tunnel(&session_id, Some("web".to_string()), TunnelProtocol::Http)
-            .unwrap();
+        core.register_http_tunnel(
+            &session_id,
+            Some("web".to_string()),
+            TunnelProtocol::Http,
+            None,
+        )
+        .unwrap();
 
         let (info, _tx) = core.resolve_http("web").unwrap();
         assert_eq!(info.subdomain.as_deref(), Some("web"));
@@ -889,7 +975,12 @@ mod tests {
         let (session_id, _rx) = dummy_session(&core);
 
         let (tid, _) = core
-            .register_http_tunnel(&session_id, Some("bye".to_string()), TunnelProtocol::Http)
+            .register_http_tunnel(
+                &session_id,
+                Some("bye".to_string()),
+                TunnelProtocol::Http,
+                None,
+            )
             .unwrap();
         let (_, port) = core.register_tcp_tunnel(&session_id).unwrap();
 
@@ -908,12 +999,12 @@ mod tests {
         let core = TunnelCore::new([50000, 50009], [0, 0], 2, 100, 1000);
         let (session_id, _rx) = dummy_session(&core);
 
-        core.register_http_tunnel(&session_id, None, TunnelProtocol::Http)
+        core.register_http_tunnel(&session_id, None, TunnelProtocol::Http, None)
             .unwrap();
-        core.register_http_tunnel(&session_id, None, TunnelProtocol::Http)
+        core.register_http_tunnel(&session_id, None, TunnelProtocol::Http, None)
             .unwrap();
 
-        let result = core.register_http_tunnel(&session_id, None, TunnelProtocol::Http);
+        let result = core.register_http_tunnel(&session_id, None, TunnelProtocol::Http, None);
         assert!(matches!(result, Err(Error::LimitExceeded(_))));
     }
 
@@ -923,7 +1014,7 @@ mod tests {
         let ghost = Uuid::new_v4();
 
         assert!(matches!(
-            core.register_http_tunnel(&ghost, None, TunnelProtocol::Http),
+            core.register_http_tunnel(&ghost, None, TunnelProtocol::Http, None),
             Err(Error::SessionNotFound(_))
         ));
     }
@@ -935,7 +1026,8 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         for s in &["abc", "my-app", "foo123", "a-b-c", "aaa"] {
-            let r = core.register_http_tunnel(&sid, Some(s.to_string()), TunnelProtocol::Http);
+            let r =
+                core.register_http_tunnel(&sid, Some(s.to_string()), TunnelProtocol::Http, None);
             assert!(r.is_ok(), "expected '{s}' to be valid, got {r:?}");
         }
     }
@@ -945,7 +1037,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         assert!(matches!(
-            core.register_http_tunnel(&sid, Some("ab".to_string()), TunnelProtocol::Http),
+            core.register_http_tunnel(&sid, Some("ab".to_string()), TunnelProtocol::Http, None),
             Err(Error::Tunnel(_))
         ));
     }
@@ -955,7 +1047,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         assert!(matches!(
-            core.register_http_tunnel(&sid, Some("-bad".to_string()), TunnelProtocol::Http),
+            core.register_http_tunnel(&sid, Some("-bad".to_string()), TunnelProtocol::Http, None),
             Err(Error::Tunnel(_))
         ));
     }
@@ -965,7 +1057,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         assert!(matches!(
-            core.register_http_tunnel(&sid, Some("bad-".to_string()), TunnelProtocol::Http),
+            core.register_http_tunnel(&sid, Some("bad-".to_string()), TunnelProtocol::Http, None),
             Err(Error::Tunnel(_))
         ));
     }
@@ -975,11 +1067,21 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         assert!(matches!(
-            core.register_http_tunnel(&sid, Some("bad_name".to_string()), TunnelProtocol::Http),
+            core.register_http_tunnel(
+                &sid,
+                Some("bad_name".to_string()),
+                TunnelProtocol::Http,
+                None
+            ),
             Err(Error::Tunnel(_))
         ));
         assert!(matches!(
-            core.register_http_tunnel(&sid, Some("bad.name".to_string()), TunnelProtocol::Http),
+            core.register_http_tunnel(
+                &sid,
+                Some("bad.name".to_string()),
+                TunnelProtocol::Http,
+                None
+            ),
             Err(Error::Tunnel(_))
         ));
     }
@@ -1037,7 +1139,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         let (tid, _) = core
-            .register_http_tunnel(&sid, Some("solo".into()), TunnelProtocol::Http)
+            .register_http_tunnel(&sid, Some("solo".into()), TunnelProtocol::Http, None)
             .unwrap();
 
         let group = core.http_routes.get("solo").unwrap();
@@ -1058,7 +1160,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         let (tid, _) = core
-            .register_http_tunnel(&sid, Some("ephemeral".into()), TunnelProtocol::Http)
+            .register_http_tunnel(&sid, Some("ephemeral".into()), TunnelProtocol::Http, None)
             .unwrap();
         assert!(core.http_routes.contains_key("ephemeral"));
 
@@ -1075,7 +1177,7 @@ mod tests {
         let core = make_core();
         let (sid, _rx) = dummy_session(&core);
         let (tid, _) = core
-            .register_http_tunnel(&sid, Some("toggle".into()), TunnelProtocol::Http)
+            .register_http_tunnel(&sid, Some("toggle".into()), TunnelProtocol::Http, None)
             .unwrap();
 
         // Flip the lone member to unhealthy.
@@ -1097,5 +1199,304 @@ mod tests {
             member.healthy.store(true, Ordering::Release);
         }
         assert!(core.resolve_http("toggle").is_some());
+    }
+
+    // ── HTTP group registration (Phase 2 of TUNNEL-7) ────────────────────
+    //
+    // These tests pin down the four cells of plan §4.3's truth table:
+    //   subdomain free + solo  →  create solo group  (already covered above)
+    //   subdomain free + group →  create new group with key_hash
+    //   subdomain taken + solo →  reject (legacy "in use")
+    //   subdomain taken + group + matching key + matching protocol →  join
+    //   subdomain taken + group + mismatched key →  reject
+    //   subdomain taken + group + mismatched protocol →  reject
+    // Plus dispatch-distributes-across-members which is the whole point.
+
+    fn solo_group_spec(name: &str, key: &str) -> GroupSpec {
+        GroupSpec {
+            group_name: name.to_string(),
+            key_hash: key.to_string(),
+            health_check: None,
+        }
+    }
+
+    /// First grouped registration creates a multi-member-shaped group
+    /// (still one member at this point) with the supplied key_hash.
+    #[test]
+    fn http_group_first_registration_sets_key_hash() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+
+        let (tid, _) = core
+            .register_http_tunnel(
+                &sid,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+
+        let group = core.http_routes.get("pool").unwrap();
+        assert_eq!(group.name, "web");
+        assert_eq!(group.key_hash.as_deref(), Some("hash-A"));
+        assert_eq!(group.members.len(), 1);
+        assert!(group.members.contains_key(&tid));
+    }
+
+    /// Two clients with the same `(subdomain, key_hash)` form one pool.
+    /// Sessions are distinct; tunnels are distinct; the routing entry is shared.
+    #[test]
+    fn http_group_second_member_with_matching_key_joins() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_a, _) = core
+            .register_http_tunnel(
+                &sid_a,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+        let (tid_b, _) = core
+            .register_http_tunnel(
+                &sid_b,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+
+        let group = core.http_routes.get("pool").unwrap();
+        assert_eq!(group.members.len(), 2);
+        assert!(group.members.contains_key(&tid_a));
+        assert!(group.members.contains_key(&tid_b));
+        // tunnel_index points each tunnel_id to the same Http(subdomain) key,
+        // so per-tunnel counter lookup keeps working.
+        assert_eq!(core.get_tunnel_request_count(&tid_a), 0);
+        assert_eq!(core.get_tunnel_request_count(&tid_b), 0);
+    }
+
+    /// A second registration with the right subdomain but wrong key is
+    /// rejected — this is the auth check that prevents one tenant from
+    /// hijacking another's pool on a shared edge.
+    #[test]
+    fn http_group_mismatched_key_is_rejected() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        core.register_http_tunnel(
+            &sid_a,
+            Some("pool".into()),
+            TunnelProtocol::Http,
+            Some(solo_group_spec("web", "hash-A")),
+        )
+        .unwrap();
+
+        let result = core.register_http_tunnel(
+            &sid_b,
+            Some("pool".into()),
+            TunnelProtocol::Http,
+            Some(solo_group_spec("web", "hash-B")),
+        );
+
+        assert!(
+            matches!(result, Err(Error::Tunnel(ref msg)) if msg.contains("group key does not match"))
+        );
+        // Group must still hold only the original member.
+        assert_eq!(core.http_routes.get("pool").unwrap().members.len(), 1);
+    }
+
+    /// Joining an existing group with a matching key but a mismatched
+    /// protocol (Http vs Https) is rejected.
+    #[test]
+    fn http_group_protocol_mismatch_is_rejected() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        core.register_http_tunnel(
+            &sid_a,
+            Some("pool".into()),
+            TunnelProtocol::Http,
+            Some(solo_group_spec("web", "hash-A")),
+        )
+        .unwrap();
+
+        let result = core.register_http_tunnel(
+            &sid_b,
+            Some("pool".into()),
+            TunnelProtocol::Https,
+            Some(solo_group_spec("web", "hash-A")),
+        );
+
+        assert!(matches!(result, Err(Error::Tunnel(ref msg)) if msg.contains("protocol mismatch")));
+        assert_eq!(core.http_routes.get("pool").unwrap().members.len(), 1);
+    }
+
+    /// A solo registration on top of an existing grouped pool is rejected
+    /// (preserves historical "subdomain in use" semantics for non-group
+    /// callers — and prevents accidentally bypassing the group key check).
+    #[test]
+    fn http_solo_on_existing_group_is_rejected() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        core.register_http_tunnel(
+            &sid_a,
+            Some("pool".into()),
+            TunnelProtocol::Http,
+            Some(solo_group_spec("web", "hash-A")),
+        )
+        .unwrap();
+
+        let result =
+            core.register_http_tunnel(&sid_b, Some("pool".into()), TunnelProtocol::Http, None);
+
+        assert!(matches!(result, Err(Error::Tunnel(ref msg)) if msg.contains("already in use")));
+    }
+
+    /// Conversely: a grouped registration on top of an existing solo
+    /// registration is rejected (`key_hash = None` on the existing group
+    /// won't match anything the joiner can supply).
+    #[test]
+    fn http_group_on_existing_solo_is_rejected() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        core.register_http_tunnel(&sid_a, Some("pool".into()), TunnelProtocol::Http, None)
+            .unwrap();
+
+        let result = core.register_http_tunnel(
+            &sid_b,
+            Some("pool".into()),
+            TunnelProtocol::Http,
+            Some(solo_group_spec("web", "hash-A")),
+        );
+
+        assert!(
+            matches!(result, Err(Error::Tunnel(ref msg)) if msg.contains("group key does not match"))
+        );
+    }
+
+    /// Removing one member of a multi-member group leaves the route in
+    /// place with the remaining members — only the *last* leave evicts it.
+    #[test]
+    fn http_group_removing_one_of_two_members_keeps_route() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_a, _) = core
+            .register_http_tunnel(
+                &sid_a,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+        let (tid_b, _) = core
+            .register_http_tunnel(
+                &sid_b,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+
+        core.remove_tunnel(&tid_a);
+
+        // Route still exists, group has one member left.
+        let group = core.http_routes.get("pool").unwrap();
+        assert_eq!(group.members.len(), 1);
+        assert!(group.members.contains_key(&tid_b));
+        assert!(core.resolve_http("pool").is_some());
+    }
+
+    /// Random dispatch across two healthy members must hit each one with
+    /// non-trivial frequency over many resolves. This is the load-balancing
+    /// promise of Phase 2.
+    #[test]
+    fn http_group_random_dispatch_distributes_across_members() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_a, _) = core
+            .register_http_tunnel(
+                &sid_a,
+                Some("lbpool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+        let (tid_b, _) = core
+            .register_http_tunnel(
+                &sid_b,
+                Some("lbpool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+
+        // Drive resolve_http() many times. resolve_http internally bumps
+        // the chosen member's request_count, so we read those counters.
+        const N: u64 = 1_000;
+        for _ in 0..N {
+            assert!(core.resolve_http("lbpool").is_some());
+        }
+
+        let count_a = core.get_tunnel_request_count(&tid_a);
+        let count_b = core.get_tunnel_request_count(&tid_b);
+        assert_eq!(count_a + count_b, N);
+
+        // With uniform random over 1000 trials and p=0.5, both should land
+        // well inside [200, 800] — this gives effectively zero flake rate
+        // while still catching a "always picks the same one" regression.
+        assert!(
+            (200..=800).contains(&count_a),
+            "expected ~500 hits on member A, got {count_a} (B got {count_b})"
+        );
+        assert!(
+            (200..=800).contains(&count_b),
+            "expected ~500 hits on member B, got {count_b} (A got {count_a})"
+        );
+    }
+
+    /// A member registered with a `health_check` starts unhealthy and is
+    /// excluded from dispatch until the first `TunnelHealthy` flips the
+    /// bit. Phase 4 wires the frame plumbing; the bit semantics belong here.
+    #[test]
+    fn http_group_member_with_health_check_starts_unhealthy() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+
+        let spec = GroupSpec {
+            group_name: "web".into(),
+            key_hash: "hash-A".into(),
+            health_check: Some(rustunnel_protocol::HealthCheckSpec {
+                kind: rustunnel_protocol::HealthCheckKind::Tcp,
+                interval_secs: 10,
+                timeout_secs: 3,
+                max_failed: 3,
+                http_path: None,
+                http_expect_2xx: true,
+            }),
+        };
+        let (tid, _) = core
+            .register_http_tunnel(&sid, Some("await".into()), TunnelProtocol::Http, Some(spec))
+            .unwrap();
+
+        // Member exists but is unhealthy → no healthy member to dispatch to.
+        let group = core.http_routes.get("await").unwrap();
+        let member = group.members.get(&tid).unwrap();
+        assert!(!member.healthy.load(Ordering::Acquire));
+        drop(member);
+        drop(group);
+        assert!(core.resolve_http("await").is_none());
     }
 }
