@@ -62,3 +62,7 @@ path = "integration/http_groups.rs"
 [[test]]
 name = "tcp_groups"
 path = "integration/tcp_groups.rs"
+
+[[test]]
+name = "health_checks"
+path = "integration/health_checks.rs"

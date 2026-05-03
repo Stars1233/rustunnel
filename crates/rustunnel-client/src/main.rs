@@ -10,6 +10,7 @@ mod config;
 mod control;
 mod display;
 mod error;
+mod health;
 mod p2p_direct;
 mod proxy;
 mod reconnect;

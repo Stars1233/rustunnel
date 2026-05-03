@@ -564,6 +564,27 @@ impl TestClient {
 
     // ── tunnel registration ───────────────────────────────────────────────────
 
+    /// Send `TunnelHealthy { tunnel_id }` over the control WS.
+    /// Phase 4 server-side handler accepts this only from the owning
+    /// session — that's why this lives on `TestClient` rather than as a
+    /// free function.
+    pub async fn send_tunnel_healthy(&mut self, tunnel_id: Uuid) -> Result<(), String> {
+        self.send(&ControlFrame::TunnelHealthy { tunnel_id }).await
+    }
+
+    /// Send `TunnelUnhealthy { tunnel_id, reason }` over the control WS.
+    pub async fn send_tunnel_unhealthy(
+        &mut self,
+        tunnel_id: Uuid,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.send(&ControlFrame::TunnelUnhealthy {
+            tunnel_id,
+            reason: reason.to_string(),
+        })
+        .await
+    }
+
     /// Register an HTTP tunnel as part of a load-balancing group.
     /// Phase 2 of TUNNEL-7. The server only honours the group fields when
     /// `[load_balancing] enabled = true`. Returns `(tunnel_id, subdomain, public_url)`.

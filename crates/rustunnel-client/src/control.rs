@@ -294,6 +294,21 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         let protocol = proto_to_enum(&tunnel.proto)?;
         let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
 
+        // Hash the user-supplied group_key (never transmit the raw value —
+        // matches the existing p2p_secret_hash convention).
+        let group_key_hash = tunnel.group_key.as_ref().map(|raw| {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(raw.as_bytes()))
+        });
+
+        // Convert the user's HealthCheckConfig into the wire-level
+        // HealthCheckSpec. Done here so a malformed config (HTTP without a
+        // path, unknown kind) fails fast at registration time.
+        let health_check_wire = match &tunnel.health_check {
+            Some(cfg) => Some(health_check_to_wire(cfg)?),
+            None => None,
+        };
+
         send_frame(
             &mut ctrl_ws,
             &ControlFrame::RegisterTunnel {
@@ -303,10 +318,9 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 local_addr,
                 p2p_secret_hash: tunnel.p2p_secret_hash.clone(),
                 p2p_name: tunnel.p2p_name.clone(),
-                // Load-balancing fields are wired up in Phase 2/4 (TUNNEL-7).
-                group: None,
-                group_key_hash: None,
-                health_check: None,
+                group: tunnel.group.clone(),
+                group_key_hash,
+                health_check: health_check_wire,
             },
         )
         .await?;
@@ -448,7 +462,39 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         .collect();
     display::print_startup_box(&display_tunnels);
 
-    // 6. Main event loop ——————————————————————————————————————————————————
+    // 6. Spawn health-probe tasks for tunnels with a health_check ─────────
+    //    Each probe task writes `TunnelHealthy` / `TunnelUnhealthy` frames
+    //    into `outbound_frame_tx`; main_loop drains that channel and writes
+    //    to the control WS. Probe tasks die when the channel closes.
+    let (outbound_frame_tx, outbound_frame_rx) =
+        mpsc::channel::<rustunnel_protocol::ControlFrame>(32);
+    for (tunnel, _url) in &registered {
+        let Some(cfg) = &tunnel.health_check else {
+            continue;
+        };
+        let Some(tunnel_id) = tunnel.registered_tunnel_id else {
+            continue;
+        };
+        let spec = match crate::health::ProbeSpec::from_config(cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(%tunnel_id, "invalid health_check config: {e}; skipping probe");
+                continue;
+            }
+        };
+        let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
+        let tx = outbound_frame_tx.clone();
+        info!(
+            %tunnel_id, ?spec.kind, interval_ms = spec.interval.as_millis() as u64,
+            "starting client-side health probe"
+        );
+        tokio::spawn(crate::health::run_probe_loop(
+            tunnel_id, local_addr, spec, tx,
+        ));
+    }
+    drop(outbound_frame_tx); // probe tasks own clones; main holder dropped so the channel closes when they exit
+
+    // 7. Main event loop ——————————————————————————————————————————————————
     main_loop(
         &mut ctrl_ws,
         stream_rx,
@@ -458,6 +504,7 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         config.insecure,
         p2p_accept_rx,
         p2p_sub_info,
+        outbound_frame_rx,
     )
     .await
 }
@@ -474,6 +521,7 @@ async fn main_loop(
     insecure: bool,
     mut p2p_accept_rx: Option<mpsc::Receiver<tokio::net::TcpStream>>,
     p2p_sub_info: Option<(String, String, Vec<u8>)>, // (target_name, secret_hash, raw_secret)
+    mut outbound_frame_rx: mpsc::Receiver<ControlFrame>,
 ) -> Result<()> {
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip the immediate first tick
@@ -538,6 +586,14 @@ async fn main_loop(
                 let ts = now_ms();
                 send_frame(ctrl_ws, &ControlFrame::Ping { timestamp: ts }).await?;
                 awaiting_pong = true;
+            }
+
+            // ── Outbound frame from a probe task ──────────────────────────
+            //    Health-probe tasks (TUNNEL-7 Phase 4) push TunnelHealthy /
+            //    TunnelUnhealthy frames here. The select arm serialises all
+            //    writes to the WS — probe tasks never touch ctrl_ws directly.
+            Some(frame) = outbound_frame_rx.recv() => {
+                send_frame(ctrl_ws, &frame).await?;
             }
 
             // ── Inbound yamux stream from background driver ───────────────
@@ -810,6 +866,37 @@ fn proto_to_enum(proto: &str) -> Result<TunnelProtocol> {
         "p2p" => Ok(TunnelProtocol::P2p),
         other => Err(Error::Config(format!("unknown protocol: {other}"))),
     }
+}
+
+/// Convert the user-facing `HealthCheckConfig` into the wire-level
+/// `HealthCheckSpec` carried by `RegisterTunnel`. Validates that
+/// `kind = "http"` includes a path. Used by the registration loop above.
+fn health_check_to_wire(
+    cfg: &crate::config::HealthCheckConfig,
+) -> Result<rustunnel_protocol::HealthCheckSpec> {
+    use rustunnel_protocol::{HealthCheckKind, HealthCheckSpec};
+    let kind = match cfg.kind.as_str() {
+        "tcp" => HealthCheckKind::Tcp,
+        "http" => HealthCheckKind::Http,
+        other => {
+            return Err(Error::Config(format!(
+                "unknown health_check kind '{other}' (expected 'tcp' or 'http')"
+            )));
+        }
+    };
+    if matches!(kind, HealthCheckKind::Http) && cfg.path.is_none() {
+        return Err(Error::Config(
+            "health_check kind='http' requires a path".into(),
+        ));
+    }
+    Ok(HealthCheckSpec {
+        kind,
+        interval_secs: cfg.interval_secs.max(1),
+        timeout_secs: cfg.timeout_secs.max(1),
+        max_failed: cfg.max_failed.max(1),
+        http_path: cfg.path.clone(),
+        http_expect_2xx: cfg.expect_2xx,
+    })
 }
 
 /// Find the local address string (`"host:port"`) for a registered tunnel
