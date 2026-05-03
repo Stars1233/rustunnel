@@ -502,7 +502,7 @@ where
             // For the disabled-flag path we log so operators can see when
             // grouped clients are being downgraded (matches the warning the
             // *client* will eventually emit on a Phase-6 server-version probe).
-            let http_group_spec = match (
+            let group_spec = match (
                 config.load_balancing.enabled,
                 group.as_ref(),
                 group_key_hash.as_ref(),
@@ -629,7 +629,7 @@ where
                         &session_id,
                         subdomain,
                         protocol.clone(),
-                        http_group_spec,
+                        group_spec,
                     ) {
                         Ok((tunnel_id, sub)) => {
                             let scheme = if protocol == TunnelProtocol::Https {
@@ -728,7 +728,7 @@ where
                         .await?;
                     }
                 },
-                TunnelProtocol::Tcp => match core.register_tcp_tunnel(&session_id) {
+                TunnelProtocol::Tcp => match core.register_tcp_tunnel(&session_id, group_spec) {
                     Ok((tunnel_id, port)) => {
                         let public_url = format!("tcp://{}:{port}", config.server.domain);
                         let port_str = port.to_string();

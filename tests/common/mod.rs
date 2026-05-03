@@ -645,6 +645,43 @@ impl TestClient {
         }
     }
 
+    /// Register a TCP tunnel as part of a load-balancing group.
+    /// Phase 3 of TUNNEL-7. The server returns the group's existing port
+    /// for the second-and-onwards member; the first allocates a fresh one.
+    /// Returns `(tunnel_id, assigned_port)`.
+    pub async fn register_tcp_tunnel_grouped(
+        &mut self,
+        group_name: &str,
+        group_key_hash: &str,
+    ) -> Result<(Uuid, u16), String> {
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::RegisterTunnel {
+            request_id: req_id,
+            protocol: TunnelProtocol::Tcp,
+            subdomain: None,
+            local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: None,
+            p2p_name: None,
+            group: Some(group_name.to_string()),
+            group_key_hash: Some(group_key_hash.to_string()),
+            health_check: None,
+        })
+        .await?;
+
+        match self.recv_timeout(Duration::from_secs(5)).await? {
+            ControlFrame::TunnelRegistered {
+                tunnel_id,
+                assigned_port,
+                ..
+            } => {
+                let port = assigned_port.ok_or("missing assigned_port")?;
+                Ok((tunnel_id, port))
+            }
+            ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
+    }
+
     /// Register a TCP tunnel.  Returns `(tunnel_id, assigned_port)`.
     pub async fn register_tcp_tunnel(&mut self) -> Result<(Uuid, u16), String> {
         let req_id = Uuid::new_v4().to_string();

@@ -271,7 +271,7 @@ mod tests {
         let mut rx = core.subscribe_tcp_events();
         let (sid, _ctrl_rx) = add_session(&core);
 
-        let (_tid, port) = core.register_tcp_tunnel(&sid).unwrap();
+        let (_tid, port) = core.register_tcp_tunnel(&sid, None).unwrap();
 
         let event = tokio::time::timeout(Duration::from_millis(100), rx.recv())
             .await
@@ -290,7 +290,7 @@ mod tests {
         let mut rx = core.subscribe_tcp_events();
         let (sid, _ctrl_rx) = add_session(&core);
 
-        let (tid, port) = core.register_tcp_tunnel(&sid).unwrap();
+        let (tid, port) = core.register_tcp_tunnel(&sid, None).unwrap();
         // consume the Registered event
         let _ = rx.recv().await;
 

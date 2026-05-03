@@ -45,6 +45,16 @@ pub struct TunnelCore {
     /// (see plan §6); the `Arc<TunnelGroup>` wrapper keeps the dispatch path
     /// uniform with HTTP/TCP.
     pub udp_routes: DashMap<u16, Arc<TunnelGroup>>,
+    /// `(group_name, key_hash) → port` lookup for TCP groups (TUNNEL-7 Phase 3).
+    ///
+    /// HTTP groups dispatch off the user-supplied subdomain, so the routing
+    /// key is in the registration request. TCP ports are server-allocated, so
+    /// the second member of `group="ssh"` doesn't know which port to ask for
+    /// — this index lets the server resolve `(group, key_hash)` to the port
+    /// the first registration claimed. The entry is only present while the
+    /// group has at least one member; `remove_tunnel` cleans it up alongside
+    /// the route entry.
+    tcp_group_index: DashMap<(String, String), u16>,
     /// name → P2pPublisher  (P2P tunnels registered by publishers)
     pub p2p_tunnels: DashMap<String, P2pPublisher>,
     /// session_id → SessionInfo
@@ -134,6 +144,7 @@ impl TunnelCore {
             http_routes: DashMap::new(),
             tcp_routes: DashMap::new(),
             udp_routes: DashMap::new(),
+            tcp_group_index: DashMap::new(),
             p2p_tunnels: DashMap::new(),
             sessions: DashMap::new(),
             available_tcp_ports: Mutex::new(tcp_ports),
@@ -344,19 +355,28 @@ impl TunnelCore {
         Ok((tunnel_id, subdomain))
     }
 
-    /// Register a TCP tunnel for `session_id`, allocating the next available port.
+    /// Register a TCP tunnel for `session_id`.
+    ///
+    /// `group = None` (the historical case): allocate a fresh port and create
+    /// a solo group, mirroring the HTTP path.
+    ///
+    /// `group = Some` (TUNNEL-7 Phase 3): the first registration of a given
+    /// `(group_name, key_hash)` allocates a port; subsequent registrations
+    /// look up that port via `tcp_group_index` and reuse it. The TCP edge
+    /// listener fires `TcpTunnelEvent::Registered` only on the first member
+    /// — joins are no-ops at the listener layer (the port is already bound
+    /// from the first member's event).
+    ///
     /// Returns `(tunnel_id, port)`.
-    pub fn register_tcp_tunnel(&self, session_id: &Uuid) -> Result<(Uuid, u16)> {
+    pub fn register_tcp_tunnel(
+        &self,
+        session_id: &Uuid,
+        group: Option<GroupSpec>,
+    ) -> Result<(Uuid, u16)> {
         self.check_session_limit(session_id)?;
 
-        let port = self
-            .available_tcp_ports
-            .lock()
-            .pop()
-            .ok_or(Error::NoPortsAvailable)?;
-
         let tunnel_id = Uuid::new_v4();
-        let info = TunnelInfo {
+        let build_info = |port: u16| TunnelInfo {
             session_id: *session_id,
             tunnel_id,
             protocol: TunnelProtocol::Tcp,
@@ -368,15 +388,80 @@ impl TunnelCore {
             conn_semaphore: Arc::new(Semaphore::new(self.max_connections_per_tunnel)),
         };
 
-        let group = TunnelGroup::new_solo(port.to_string(), info);
-        self.tcp_routes.insert(port, group);
-        self.tunnel_index.insert(tunnel_id, TunnelKey::Tcp(port));
-        self.add_tunnel_to_session(session_id, tunnel_id);
-        let _ = self
-            .tcp_events
-            .send(TcpTunnelEvent::Registered { tunnel_id, port });
-
-        Ok((tunnel_id, port))
+        use dashmap::mapref::entry::Entry;
+        match group {
+            None => {
+                // Solo path — historical behaviour.
+                let port = self
+                    .available_tcp_ports
+                    .lock()
+                    .pop()
+                    .ok_or(Error::NoPortsAvailable)?;
+                let info = build_info(port);
+                let new_group = TunnelGroup::new_solo(port.to_string(), info);
+                self.tcp_routes.insert(port, new_group);
+                self.tunnel_index.insert(tunnel_id, TunnelKey::Tcp(port));
+                self.add_tunnel_to_session(session_id, tunnel_id);
+                let _ = self
+                    .tcp_events
+                    .send(TcpTunnelEvent::Registered { tunnel_id, port });
+                Ok((tunnel_id, port))
+            }
+            Some(spec) => {
+                let idx_key = (spec.group_name.clone(), spec.key_hash.clone());
+                // The index entry guard serialises every "creation or join"
+                // for this `(name, key_hash)` against every other one — and
+                // against the matching `remove_tunnel` path, which acquires
+                // the same entry to evict the index. Closes the
+                // concurrent-first-registration race for TCP groups.
+                match self.tcp_group_index.entry(idx_key) {
+                    Entry::Vacant(idx_vac) => {
+                        // First member of a brand-new TCP group.
+                        let port = self
+                            .available_tcp_ports
+                            .lock()
+                            .pop()
+                            .ok_or(Error::NoPortsAvailable)?;
+                        let info = build_info(port);
+                        let new_group = TunnelGroup::new_with_member(
+                            spec.group_name,
+                            Some(spec.key_hash),
+                            GroupMember::with_health_spec(info, spec.health_check),
+                        );
+                        self.tcp_routes.insert(port, new_group);
+                        idx_vac.insert(port);
+                        self.tunnel_index.insert(tunnel_id, TunnelKey::Tcp(port));
+                        self.add_tunnel_to_session(session_id, tunnel_id);
+                        let _ = self
+                            .tcp_events
+                            .send(TcpTunnelEvent::Registered { tunnel_id, port });
+                        Ok((tunnel_id, port))
+                    }
+                    Entry::Occupied(idx_occ) => {
+                        // Subsequent member: reuse the existing port. No new
+                        // allocation, no `Registered` event (the listener is
+                        // already up from the first member).
+                        let port = *idx_occ.get();
+                        let info = build_info(port);
+                        // Sanity: the route must exist while the index says
+                        // it does. If it doesn't, the index is stale — bail.
+                        let Some(existing) = self.tcp_routes.get(&port) else {
+                            return Err(Error::Tunnel(format!(
+                                "TCP group index points to missing port {port}; please retry"
+                            )));
+                        };
+                        existing.members.insert(
+                            tunnel_id,
+                            GroupMember::with_health_spec(info, spec.health_check),
+                        );
+                        drop(existing);
+                        self.tunnel_index.insert(tunnel_id, TunnelKey::Tcp(port));
+                        self.add_tunnel_to_session(session_id, tunnel_id);
+                        Ok((tunnel_id, port))
+                    }
+                }
+            }
+        }
     }
 
     /// Register a UDP tunnel for `session_id`, allocating the next available port.
@@ -515,16 +600,25 @@ impl TunnelCore {
                 }
             }
             TunnelKey::Tcp(port) => {
-                let group_empty = self
+                // Snapshot the group's identity *before* mutating its members
+                // — we need (name, key_hash) to find the index entry to evict
+                // when the last member leaves. We always remove the member;
+                // tcp_group_index cleanup only happens for grouped (key_hash
+                // is Some) and only when the group is now empty.
+                let (group_empty, idx_key) = self
                     .tcp_routes
                     .get(&port)
                     .map(|g| {
+                        let idx = g.key_hash.as_ref().map(|kh| (g.name.clone(), kh.clone()));
                         g.members.remove(tunnel_id);
-                        g.members.is_empty()
+                        (g.members.is_empty(), idx)
                     })
-                    .unwrap_or(true);
+                    .unwrap_or((true, None));
                 if group_empty {
                     self.tcp_routes.remove(&port);
+                    if let Some(k) = idx_key {
+                        self.tcp_group_index.remove(&k);
+                    }
                     self.available_tcp_ports.lock().push(port);
                     let _ = self.tcp_events.send(TcpTunnelEvent::Unregistered { port });
                 }
@@ -873,7 +967,7 @@ mod tests {
         let core = make_core();
         let (session_id, _rx) = dummy_session(&core);
 
-        let (tunnel_id, port) = core.register_tcp_tunnel(&session_id).unwrap();
+        let (tunnel_id, port) = core.register_tcp_tunnel(&session_id, None).unwrap();
 
         assert!((20000..=20009).contains(&port));
         assert!(core.tcp_routes.contains_key(&port));
@@ -890,13 +984,13 @@ mod tests {
         let core = TunnelCore::new([30000, 30000], [0, 0], 5, 100, 1000); // single-port range
         let (session_id, _rx) = dummy_session(&core);
 
-        let (tunnel_id, port) = core.register_tcp_tunnel(&session_id).unwrap();
+        let (tunnel_id, port) = core.register_tcp_tunnel(&session_id, None).unwrap();
         assert_eq!(port, 30000);
 
         // Pool is now empty — next allocation must fail.
         let (session2_id, _rx2) = dummy_session(&core);
         assert!(matches!(
-            core.register_tcp_tunnel(&session2_id),
+            core.register_tcp_tunnel(&session2_id, None),
             Err(Error::NoPortsAvailable)
         ));
 
@@ -904,7 +998,7 @@ mod tests {
         core.remove_tunnel(&tunnel_id);
 
         // Now allocation succeeds again.
-        let (_id2, port2) = core.register_tcp_tunnel(&session2_id).unwrap();
+        let (_id2, port2) = core.register_tcp_tunnel(&session2_id, None).unwrap();
         assert_eq!(port2, 30000);
     }
 
@@ -914,10 +1008,10 @@ mod tests {
         let (sid1, _rx1) = dummy_session(&core);
         let (sid2, _rx2) = dummy_session(&core);
 
-        core.register_tcp_tunnel(&sid1).unwrap();
+        core.register_tcp_tunnel(&sid1, None).unwrap();
 
         assert!(matches!(
-            core.register_tcp_tunnel(&sid2),
+            core.register_tcp_tunnel(&sid2, None),
             Err(Error::NoPortsAvailable)
         ));
     }
@@ -954,7 +1048,7 @@ mod tests {
         let core = make_core();
         let (session_id, _rx) = dummy_session(&core);
 
-        let (_, port) = core.register_tcp_tunnel(&session_id).unwrap();
+        let (_, port) = core.register_tcp_tunnel(&session_id, None).unwrap();
 
         let (info, _tx) = core.resolve_tcp(port).unwrap();
         assert_eq!(info.assigned_port, Some(port));
@@ -982,7 +1076,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (_, port) = core.register_tcp_tunnel(&session_id).unwrap();
+        let (_, port) = core.register_tcp_tunnel(&session_id, None).unwrap();
 
         core.remove_session(&session_id);
 
@@ -1465,6 +1559,207 @@ mod tests {
             (200..=800).contains(&count_b),
             "expected ~500 hits on member B, got {count_b} (A got {count_a})"
         );
+    }
+
+    // ── TCP group registration (Phase 3 of TUNNEL-7) ─────────────────────
+    //
+    // Same shape as the HTTP truth table, plus the port-pool wrinkle:
+    // first member of a group allocates a port; subsequent members reuse
+    // it; only when the *last* member leaves does the port go back to the
+    // pool and the listener-Unregistered event fire.
+    //
+    // For these tests we use the dedicated event subscriber to assert the
+    // edge-listener event semantics — silence is the contract for joiners.
+
+    /// First TCP-grouped registration allocates a port from the pool;
+    /// `tcp_group_index` records the mapping; the listener gets a
+    /// `Registered` event so the edge knows to bind.
+    #[test]
+    fn tcp_group_first_registration_allocates_port_and_indexes() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+        let mut events = core.subscribe_tcp_events();
+
+        let (tid, port) = core
+            .register_tcp_tunnel(&sid, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+
+        // Routing entry is in place with the right key_hash.
+        let group = core.tcp_routes.get(&port).unwrap();
+        assert_eq!(group.name, "ssh");
+        assert_eq!(group.key_hash.as_deref(), Some("hash-A"));
+        assert_eq!(group.members.len(), 1);
+        assert!(group.members.contains_key(&tid));
+        drop(group);
+
+        // Index resolves the (name, key_hash) → port.
+        let idx_port = core
+            .tcp_group_index
+            .get(&("ssh".to_string(), "hash-A".to_string()))
+            .map(|v| *v);
+        assert_eq!(idx_port, Some(port));
+
+        // Edge listener got the Registered event for the first member.
+        let evt = events
+            .try_recv()
+            .expect("Registered event for first member");
+        match evt {
+            TcpTunnelEvent::Registered { tunnel_id, port: p } => {
+                assert_eq!(tunnel_id, tid);
+                assert_eq!(p, port);
+            }
+            other => panic!("expected Registered, got {other:?}"),
+        }
+    }
+
+    /// Second registration with the same `(group, key_hash)` reuses the
+    /// existing port and does NOT fire a new Registered event — the
+    /// listener is already bound.
+    #[test]
+    fn tcp_group_second_member_reuses_port_no_extra_event() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+        let mut events = core.subscribe_tcp_events();
+
+        let (_tid_a, port_a) = core
+            .register_tcp_tunnel(&sid_a, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+        let (_tid_b, port_b) = core
+            .register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+
+        assert_eq!(
+            port_a, port_b,
+            "second member must reuse the first member's port"
+        );
+
+        let group = core.tcp_routes.get(&port_a).unwrap();
+        assert_eq!(group.members.len(), 2);
+        drop(group);
+
+        // First Registered was for tid_a; nothing else.
+        let _first = events.try_recv().expect("Registered for first member");
+        assert!(
+            events.try_recv().is_err(),
+            "no Registered event must fire for join — the listener is already up"
+        );
+    }
+
+    /// Mismatched key on the same group name → rejected.
+    #[test]
+    fn tcp_group_mismatched_key_creates_a_separate_pool() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (_tid_a, port_a) = core
+            .register_tcp_tunnel(&sid_a, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+        // Different key → different index entry → fresh port allocation.
+        // (FRP allows this since `(name, key)` is the pool identity.)
+        let (_tid_b, port_b) = core
+            .register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-B")))
+            .unwrap();
+
+        assert_ne!(
+            port_a, port_b,
+            "different keys → different pools → different ports"
+        );
+        assert_eq!(core.tcp_routes.get(&port_a).unwrap().members.len(), 1);
+        assert_eq!(core.tcp_routes.get(&port_b).unwrap().members.len(), 1);
+    }
+
+    /// Removing one of two members keeps the route + the index entry; only
+    /// the *last* leave evicts everything and returns the port to the pool.
+    #[test]
+    fn tcp_group_removing_one_of_two_keeps_port_allocated() {
+        let core = TunnelCore::new([60000, 60001], [0, 0], 5, 100, 1000);
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+        let mut events = core.subscribe_tcp_events();
+
+        let (tid_a, port) = core
+            .register_tcp_tunnel(&sid_a, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+        let (tid_b, port_b) = core
+            .register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+        assert_eq!(port, port_b);
+
+        // Drain the Registered event from creation.
+        let _ = events.try_recv();
+
+        // Remove one member — port stays, index stays, no Unregistered event.
+        core.remove_tunnel(&tid_a);
+        assert!(core.tcp_routes.contains_key(&port));
+        assert!(core
+            .tcp_group_index
+            .contains_key(&("ssh".to_string(), "hash-A".to_string())));
+        assert!(events.try_recv().is_err());
+
+        // Remove the last member — port returns to pool, index clears,
+        // Unregistered fires.
+        core.remove_tunnel(&tid_b);
+        assert!(!core.tcp_routes.contains_key(&port));
+        assert!(!core
+            .tcp_group_index
+            .contains_key(&("ssh".to_string(), "hash-A".to_string())));
+        let evt = events.try_recv().expect("Unregistered for last leave");
+        assert!(matches!(evt, TcpTunnelEvent::Unregistered { port: p } if p == port));
+    }
+
+    /// Random dispatch across two TCP members — same property the HTTP test
+    /// pins down, exercised through `resolve_tcp(port)`.
+    #[test]
+    fn tcp_group_random_dispatch_distributes_across_members() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_a, port) = core
+            .register_tcp_tunnel(&sid_a, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+        let (tid_b, _) = core
+            .register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+
+        const N: u64 = 1_000;
+        for _ in 0..N {
+            assert!(core.resolve_tcp(port).is_some());
+        }
+
+        let count_a = core.get_tunnel_request_count(&tid_a);
+        let count_b = core.get_tunnel_request_count(&tid_b);
+        assert_eq!(count_a + count_b, N);
+        assert!(
+            (200..=800).contains(&count_a),
+            "expected ~500 hits on member A, got {count_a} (B got {count_b})"
+        );
+        assert!(
+            (200..=800).contains(&count_b),
+            "expected ~500 hits on member B, got {count_b} (A got {count_a})"
+        );
+    }
+
+    /// Port pool is finite — when a brand-new TCP group can't allocate a
+    /// fresh port, registration fails with `NoPortsAvailable` (same as the
+    /// solo path).
+    #[test]
+    fn tcp_group_first_registration_respects_port_pool() {
+        let core = TunnelCore::new([60100, 60100], [0, 0], 5, 100, 1000);
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        // First grouped registration takes the only port.
+        core.register_tcp_tunnel(&sid_a, Some(solo_group_spec("ssh", "hash-A")))
+            .unwrap();
+
+        // A *different* group needs a different port — pool is empty.
+        assert!(matches!(
+            core.register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-B"))),
+            Err(Error::NoPortsAvailable)
+        ));
     }
 
     /// A member registered with a `health_check` starts unhealthy and is
