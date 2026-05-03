@@ -258,25 +258,39 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     )
     .await?;
 
-    let session_id = match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT).await? {
-        ControlFrame::AuthOk {
-            session_id,
-            server_version,
-        } => {
-            info!(%session_id, %server_version, "authenticated");
-            session_id
-        }
-        ControlFrame::AuthError { message } => {
-            sp.finish_and_clear();
-            return Err(Error::Auth(message));
-        }
-        other => {
-            sp.finish_and_clear();
-            return Err(Error::Connection(format!(
-                "unexpected frame during auth: {other:?}"
-            )));
-        }
-    };
+    let (session_id, server_supports_lb) =
+        match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT).await? {
+            ControlFrame::AuthOk {
+                session_id,
+                server_version,
+            } => {
+                info!(%session_id, %server_version, "authenticated");
+                // TUNNEL-7 Phase 6: gate emission of the new wire fields and
+                // probe-loop spawning on server version. An older edge that
+                // doesn't recognise `TunnelHealthy` / `TunnelUnhealthy` would
+                // log a `decode_frame` warning per frame; we just refrain
+                // from sending them.
+                let supports_lb = crate::version::server_supports_load_balancing(&server_version);
+                if !supports_lb {
+                    debug!(
+                        %server_version,
+                        "server does not advertise TUNNEL-7 load-balancing support; \
+                         group fields and health probes will be suppressed for this session"
+                    );
+                }
+                (session_id, supports_lb)
+            }
+            ControlFrame::AuthError { message } => {
+                sp.finish_and_clear();
+                return Err(Error::Auth(message));
+            }
+            other => {
+                sp.finish_and_clear();
+                return Err(Error::Connection(format!(
+                    "unexpected frame during auth: {other:?}"
+                )));
+            }
+        };
 
     sp.set_message("Registering tunnels…");
 
@@ -294,20 +308,43 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         let protocol = proto_to_enum(&tunnel.proto)?;
         let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
 
-        // Hash the user-supplied group_key (never transmit the raw value —
-        // matches the existing p2p_secret_hash convention).
-        let group_key_hash = tunnel.group_key.as_ref().map(|raw| {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(raw.as_bytes()))
-        });
-
-        // Convert the user's HealthCheckConfig into the wire-level
-        // HealthCheckSpec. Done here so a malformed config (HTTP without a
-        // path, unknown kind) fails fast at registration time.
-        let health_check_wire = match &tunnel.health_check {
-            Some(cfg) => Some(health_check_to_wire(cfg)?),
-            None => None,
-        };
+        // ── Version gate (TUNNEL-7 Phase 6) ───────────────────────────────
+        // Only emit the load-balancing fields when the edge advertises
+        // support. An older edge would just ignore them at the wire level
+        // (Option fields with #[serde(default)]) but we suppress them
+        // anyway to (a) keep logs clean and (b) make the user-visible
+        // behaviour symmetric: configured group + old edge → same as
+        // ungrouped + new edge. We warn loudly so the misconfig doesn't
+        // silently degrade.
+        let (effective_group, effective_group_key_hash, effective_health_check) =
+            if server_supports_lb {
+                let group_key_hash = tunnel.group_key.as_ref().map(|raw| {
+                    use sha2::{Digest, Sha256};
+                    hex::encode(Sha256::digest(raw.as_bytes()))
+                });
+                let health_check_wire = match &tunnel.health_check {
+                    Some(cfg) => Some(health_check_to_wire(cfg)?),
+                    None => None,
+                };
+                (tunnel.group.clone(), group_key_hash, health_check_wire)
+            } else {
+                if tunnel.group.is_some() || tunnel.group_key.is_some() {
+                    warn!(
+                        subdomain = ?tunnel.subdomain,
+                        group = ?tunnel.group,
+                        "server does not support load balancing — registering as a solo tunnel; \
+                         bump your edge to 0.7+ to enable group dispatch"
+                    );
+                }
+                if tunnel.health_check.is_some() {
+                    warn!(
+                        subdomain = ?tunnel.subdomain,
+                        "server does not support health probes — disabling client-side probe loop \
+                         for this tunnel; bump your edge to 0.7+ to enable failover routing"
+                    );
+                }
+                (None, None, None)
+            };
 
         send_frame(
             &mut ctrl_ws,
@@ -318,9 +355,9 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 local_addr,
                 p2p_secret_hash: tunnel.p2p_secret_hash.clone(),
                 p2p_name: tunnel.p2p_name.clone(),
-                group: tunnel.group.clone(),
-                group_key_hash,
-                health_check: health_check_wire,
+                group: effective_group,
+                group_key_hash: effective_group_key_hash,
+                health_check: effective_health_check,
             },
         )
         .await?;
@@ -466,31 +503,39 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     //    Each probe task writes `TunnelHealthy` / `TunnelUnhealthy` frames
     //    into `outbound_frame_tx`; main_loop drains that channel and writes
     //    to the control WS. Probe tasks die when the channel closes.
+    //
+    //    Skipped entirely when the server doesn't advertise load-balancing
+    //    support (TUNNEL-7 Phase 6) — the probe's only output channel is
+    //    those frames, which an older edge would log as `decode_frame`
+    //    errors. We already warned at registration time above; the spawn
+    //    branch just no-ops.
     let (outbound_frame_tx, outbound_frame_rx) =
         mpsc::channel::<rustunnel_protocol::ControlFrame>(32);
-    for (tunnel, _url) in &registered {
-        let Some(cfg) = &tunnel.health_check else {
-            continue;
-        };
-        let Some(tunnel_id) = tunnel.registered_tunnel_id else {
-            continue;
-        };
-        let spec = match crate::health::ProbeSpec::from_config(cfg) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(%tunnel_id, "invalid health_check config: {e}; skipping probe");
+    if server_supports_lb {
+        for (tunnel, _url) in &registered {
+            let Some(cfg) = &tunnel.health_check else {
                 continue;
-            }
-        };
-        let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
-        let tx = outbound_frame_tx.clone();
-        info!(
-            %tunnel_id, ?spec.kind, interval_ms = spec.interval.as_millis() as u64,
-            "starting client-side health probe"
-        );
-        tokio::spawn(crate::health::run_probe_loop(
-            tunnel_id, local_addr, spec, tx,
-        ));
+            };
+            let Some(tunnel_id) = tunnel.registered_tunnel_id else {
+                continue;
+            };
+            let spec = match crate::health::ProbeSpec::from_config(cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(%tunnel_id, "invalid health_check config: {e}; skipping probe");
+                    continue;
+                }
+            };
+            let local_addr = format!("{}:{}", tunnel.local_host, tunnel.local_port);
+            let tx = outbound_frame_tx.clone();
+            info!(
+                %tunnel_id, ?spec.kind, interval_ms = spec.interval.as_millis() as u64,
+                "starting client-side health probe"
+            );
+            tokio::spawn(crate::health::run_probe_loop(
+                tunnel_id, local_addr, spec, tx,
+            ));
+        }
     }
     drop(outbound_frame_tx); // probe tasks own clones; main holder dropped so the channel closes when they exit
 
