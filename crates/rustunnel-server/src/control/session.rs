@@ -1141,18 +1141,57 @@ where
             // not used for billing (direct P2P traffic can't be verified).
         }
 
-        // Phase 0 of TUNNEL-7: accept the new health-report frames so newer
-        // clients connecting to this server don't trip a `decode_frame`
-        // warning. Behaviour wires up in Phase 4 (group dispatch + healthy
-        // bit). Until then the only effect is a debug-level log line.
-        ControlFrame::TunnelHealthy { tunnel_id } => {
-            tracing::debug!(%session_id, %tunnel_id, "tunnel reported healthy (no-op pre-Phase-4)");
-        }
+        // TUNNEL-7 Phase 4: health-bit toggle from the client. Each tunnel's
+        // owning session may flip the bit for its own tunnels only; a frame
+        // referencing someone else's tunnel_id is silently dropped (logged
+        // at warn so an attempted abuse leaves a trail).
+        ControlFrame::TunnelHealthy { tunnel_id } => match core.tunnel_session(&tunnel_id) {
+            Some(owner) if owner == session_id => {
+                if core.set_tunnel_healthy(&tunnel_id) {
+                    tracing::debug!(%session_id, %tunnel_id, "tunnel marked healthy");
+                } else {
+                    tracing::debug!(
+                        %session_id, %tunnel_id,
+                        "TunnelHealthy: tunnel found by session but member missing — race"
+                    );
+                }
+            }
+            Some(other_owner) => {
+                tracing::warn!(
+                    %session_id, %tunnel_id, %other_owner,
+                    "TunnelHealthy from non-owning session — ignored"
+                );
+            }
+            None => {
+                tracing::debug!(
+                    %session_id, %tunnel_id,
+                    "TunnelHealthy for unknown tunnel — ignored"
+                );
+            }
+        },
         ControlFrame::TunnelUnhealthy { tunnel_id, reason } => {
-            tracing::debug!(
-                %session_id, %tunnel_id, %reason,
-                "tunnel reported unhealthy (no-op pre-Phase-4)"
-            );
+            match core.tunnel_session(&tunnel_id) {
+                Some(owner) if owner == session_id => {
+                    if core.set_tunnel_unhealthy(&tunnel_id, &reason) {
+                        tracing::debug!(
+                            %session_id, %tunnel_id, %reason,
+                            "tunnel marked unhealthy"
+                        );
+                    }
+                }
+                Some(other_owner) => {
+                    tracing::warn!(
+                        %session_id, %tunnel_id, %other_owner,
+                        "TunnelUnhealthy from non-owning session — ignored"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        %session_id, %tunnel_id,
+                        "TunnelUnhealthy for unknown tunnel — ignored"
+                    );
+                }
+            }
         }
 
         other => {

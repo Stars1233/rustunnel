@@ -726,6 +726,74 @@ impl TunnelCore {
         }
     }
 
+    // ── health-check bit (TUNNEL-7 Phase 4) ───────────────────────────────────
+
+    /// Mark `tunnel_id` healthy and reset its consecutive-failure counter.
+    /// Called from the session frame handler when a `TunnelHealthy` arrives.
+    /// Returns `true` if the tunnel was found and updated, `false` otherwise.
+    /// The caller is expected to gate this on session ownership — see the
+    /// auth check in `control/session.rs`.
+    pub fn set_tunnel_healthy(&self, tunnel_id: &Uuid) -> bool {
+        self.with_member(tunnel_id, |member| {
+            member.healthy.store(true, Ordering::Release);
+            member.consecutive_failures.store(0, Ordering::Release);
+        })
+    }
+
+    /// Mark `tunnel_id` unhealthy and bump its consecutive-failure counter.
+    /// `reason` is a free-form string from the client used for dashboards.
+    /// Returns `true` if the tunnel was found and updated.
+    pub fn set_tunnel_unhealthy(&self, tunnel_id: &Uuid, reason: &str) -> bool {
+        self.with_member(tunnel_id, |member| {
+            member.healthy.store(false, Ordering::Release);
+            member.consecutive_failures.fetch_add(1, Ordering::Release);
+            tracing::debug!(%tunnel_id, %reason, "tunnel marked unhealthy");
+        })
+    }
+
+    /// Resolve `tunnel_id` to its `GroupMember` (across http/tcp/udp routes)
+    /// and run `f` on it. Returns `true` if the tunnel + member were found.
+    fn with_member<F>(&self, tunnel_id: &Uuid, f: F) -> bool
+    where
+        F: FnOnce(&GroupMember),
+    {
+        let key = match self.tunnel_index.get(tunnel_id).as_deref().cloned() {
+            Some(k) => k,
+            None => return false,
+        };
+        let group = match key {
+            TunnelKey::Http(sub) => self.http_routes.get(&sub).map(|g| Arc::clone(&g)),
+            TunnelKey::Tcp(port) => self.tcp_routes.get(&port).map(|g| Arc::clone(&g)),
+            TunnelKey::Udp(port) => self.udp_routes.get(&port).map(|g| Arc::clone(&g)),
+            TunnelKey::P2p(_) => None, // health checks not supported for P2P
+        };
+        let Some(group) = group else { return false };
+        let Some(member) = group.members.get(tunnel_id) else {
+            return false;
+        };
+        f(&member);
+        true
+    }
+
+    /// Look up the session that owns `tunnel_id`. Used by the frame handler
+    /// to authorise health-bit toggles — only the owning session may flip
+    /// the flag for its own tunnels.
+    pub fn tunnel_session(&self, tunnel_id: &Uuid) -> Option<Uuid> {
+        let key = self.tunnel_index.get(tunnel_id).as_deref().cloned()?;
+        let group = match key {
+            TunnelKey::Http(sub) => self.http_routes.get(&sub).map(|g| Arc::clone(&g))?,
+            TunnelKey::Tcp(port) => self.tcp_routes.get(&port).map(|g| Arc::clone(&g))?,
+            TunnelKey::Udp(port) => self.udp_routes.get(&port).map(|g| Arc::clone(&g))?,
+            TunnelKey::P2p(name) => {
+                return self
+                    .p2p_tunnels
+                    .get(&name)
+                    .map(|p| p.tunnel_info.session_id);
+            }
+        };
+        group.members.get(tunnel_id).map(|m| m.info.session_id)
+    }
+
     // ── resolution (hot path) ─────────────────────────────────────────────────
 
     /// Look up the tunnel and its session's control channel by subdomain.
@@ -1760,6 +1828,125 @@ mod tests {
             core.register_tcp_tunnel(&sid_b, Some(solo_group_spec("ssh", "hash-B"))),
             Err(Error::NoPortsAvailable)
         ));
+    }
+
+    // ── set_tunnel_healthy / set_tunnel_unhealthy (Phase 4) ──────────────
+
+    /// `set_tunnel_unhealthy` flips the bit; subsequent dispatch routes
+    /// around the unhealthy member. `set_tunnel_healthy` brings it back.
+    /// `consecutive_failures` resets to 0 on healthy, increments on
+    /// unhealthy.
+    #[test]
+    fn set_tunnel_health_toggles_bit_and_failures() {
+        let core = make_core();
+        let (sid, _rx) = dummy_session(&core);
+        let (tid, _) = core
+            .register_http_tunnel(&sid, Some("hcheck".into()), TunnelProtocol::Http, None)
+            .unwrap();
+
+        // Solo member starts healthy.
+        assert!(core.resolve_http("hcheck").is_some());
+
+        // Mark unhealthy → dispatch excludes it; failure counter bumps.
+        assert!(core.set_tunnel_unhealthy(&tid, "probe-1 failed"));
+        assert!(core.resolve_http("hcheck").is_none());
+        let group = core.http_routes.get("hcheck").unwrap();
+        let member = group.members.get(&tid).unwrap();
+        assert_eq!(member.consecutive_failures.load(Ordering::Acquire), 1);
+        drop(member);
+        drop(group);
+
+        // Another unhealthy → counter to 2.
+        core.set_tunnel_unhealthy(&tid, "probe-2 failed");
+        let group = core.http_routes.get("hcheck").unwrap();
+        let member = group.members.get(&tid).unwrap();
+        assert_eq!(member.consecutive_failures.load(Ordering::Acquire), 2);
+        drop(member);
+        drop(group);
+
+        // Healthy resets counter to 0 + restores dispatch.
+        assert!(core.set_tunnel_healthy(&tid));
+        let group = core.http_routes.get("hcheck").unwrap();
+        let member = group.members.get(&tid).unwrap();
+        assert_eq!(member.consecutive_failures.load(Ordering::Acquire), 0);
+        drop(member);
+        drop(group);
+        assert!(core.resolve_http("hcheck").is_some());
+    }
+
+    /// `set_tunnel_healthy` / `set_tunnel_unhealthy` return `false` for
+    /// unknown tunnel IDs — the frame handler relies on this for the
+    /// "unknown tunnel" path.
+    #[test]
+    fn set_tunnel_health_returns_false_for_unknown() {
+        let core = make_core();
+        let ghost = Uuid::new_v4();
+        assert!(!core.set_tunnel_healthy(&ghost));
+        assert!(!core.set_tunnel_unhealthy(&ghost, "doesn't matter"));
+    }
+
+    /// `tunnel_session` resolves the owning session for HTTP, TCP, and UDP
+    /// tunnels. The frame handler uses this to gate health-bit toggles to
+    /// the owning session only.
+    #[test]
+    fn tunnel_session_resolves_owner_across_protocols() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_http, _) = core
+            .register_http_tunnel(&sid_a, Some("owner".into()), TunnelProtocol::Http, None)
+            .unwrap();
+        let (tid_tcp, _) = core.register_tcp_tunnel(&sid_b, None).unwrap();
+
+        assert_eq!(core.tunnel_session(&tid_http), Some(sid_a));
+        assert_eq!(core.tunnel_session(&tid_tcp), Some(sid_b));
+        assert_eq!(core.tunnel_session(&Uuid::new_v4()), None);
+    }
+
+    /// In a multi-member HTTP group, marking one member unhealthy must
+    /// route all subsequent connections to the other. This is the
+    /// load-balancing-with-health invariant — Phase 4's whole point.
+    #[test]
+    fn unhealthy_member_in_group_routes_around() {
+        let core = make_core();
+        let (sid_a, _rx_a) = dummy_session(&core);
+        let (sid_b, _rx_b) = dummy_session(&core);
+
+        let (tid_a, _) = core
+            .register_http_tunnel(
+                &sid_a,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+        let (tid_b, _) = core
+            .register_http_tunnel(
+                &sid_b,
+                Some("pool".into()),
+                TunnelProtocol::Http,
+                Some(solo_group_spec("web", "hash-A")),
+            )
+            .unwrap();
+
+        // Mark A unhealthy. All N dispatches must land on B.
+        core.set_tunnel_unhealthy(&tid_a, "probe failed");
+        for _ in 0..50 {
+            assert!(core.resolve_http("pool").is_some());
+        }
+        assert_eq!(core.get_tunnel_request_count(&tid_a), 0);
+        assert_eq!(core.get_tunnel_request_count(&tid_b), 50);
+
+        // Bring A back. Now dispatch distributes again.
+        core.set_tunnel_healthy(&tid_a);
+        for _ in 0..200 {
+            core.resolve_http("pool");
+        }
+        // Both should have grown — A from 0, B beyond 50. Loose bounds
+        // for flake-resistance; the point is "A serves requests again".
+        assert!(core.get_tunnel_request_count(&tid_a) > 30);
+        assert!(core.get_tunnel_request_count(&tid_b) > 80);
     }
 
     /// A member registered with a `health_check` starts unhealthy and is
