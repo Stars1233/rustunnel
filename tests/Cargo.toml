@@ -58,3 +58,7 @@ path = "integration/p2p_tunnel.rs"
 [[test]]
 name = "http_groups"
 path = "integration/http_groups.rs"
+
+[[test]]
+name = "tcp_groups"
+path = "integration/tcp_groups.rs"
