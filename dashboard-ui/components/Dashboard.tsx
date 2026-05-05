@@ -5,12 +5,14 @@ import type { Tunnel, CapturedRequest, Region } from '@/lib/types';
 import { makeApi } from '@/lib/api';
 import { loadRegions, regionApiUrl } from '@/lib/regions';
 import { useTunnels } from '@/hooks/useTunnels';
+import { useGroups } from '@/hooks/useGroups';
 import { useRequests } from '@/hooks/useRequests';
 import { useRegionHealth } from '@/hooks/useRegionHealth';
 import { AuthGate } from './AuthGate';
 import { Header } from './Header';
 import { Panel } from './Panel';
 import { TunnelTable } from './TunnelTable';
+import { GroupsPanel } from './GroupsPanel';
 import { RequestList } from './RequestList';
 import { RequestDetail } from './RequestDetail';
 import { TokensPanel } from './TokensPanel';
@@ -45,6 +47,11 @@ export default function Dashboard() {
 
   // Active tunnels — fanned out across all regions.
   const { tunnels, error: tunnelErr, refresh: refreshTunnels } = useTunnels(regionApis, !!token);
+
+  // Load-balancing groups — fanned out the same way; older edges (no
+  // `/api/groups` endpoint) just contribute zero rows. The panel itself
+  // auto-hides when nothing is grouped.
+  const { groups } = useGroups(regionApis, !!token);
 
   const [selectedTunnel, setSelectedTunnel] = useState<Tunnel | null>(null);
   const [selectedRequest, setSelectedRequest] = useState<CapturedRequest | null>(null);
@@ -137,6 +144,14 @@ export default function Dashboard() {
             </button>
           </div>
         )}
+
+        {/*
+         * Load-balancing groups panel — only rendered when at least one
+         * group is active. On a fleet running solo tunnels (= no clients
+         * configured `group:` yet), the dashboard looks identical to
+         * before TUNNEL-8 Phase 5d.
+         */}
+        {groups.length > 0 && <GroupsPanel groups={groups} />}
 
         {/* Active tunnels */}
         <Panel
