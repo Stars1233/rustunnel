@@ -501,21 +501,33 @@ impl TestServer {
         });
         task_handles.push(h.abort_handle());
 
-        // Wait until the control plane is actually accepting TCP connections.
+        // Wait until every public listener is actually accepting TCP
+        // connections — control plane, HTTP edge, HTTPS edge, dashboard.
         // A fixed sleep is unreliable on CI; polling eliminates the race.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{control_port}"))
-                .await
-                .is_ok()
-            {
-                break;
+        // We poll all four ports because the four background tasks bind
+        // their listeners independently. On a slow runner the test
+        // client can outrun the HTTPS bind and get ECONNREFUSED if we
+        // only wait for the control port.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        for (label, port) in [
+            ("control plane", control_port),
+            ("http edge", http_port),
+            ("https edge", https_port),
+            ("dashboard", dashboard_port),
+        ] {
+            loop {
+                if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{label} did not start within 10 seconds"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "server control plane did not start within 5 seconds"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         Self {
