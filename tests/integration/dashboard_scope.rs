@@ -70,6 +70,15 @@ async fn delete_token(db: &rustunnel_server::db::Db, token_id: &str) {
 }
 
 async fn delete_user(db: &rustunnel_server::db::Db, user_id: Uuid) {
+    // `tunnel_log.user_id` is a FK to `users.id` (RESTRICT on default).
+    // Tests register tunnels through the production handshake, which
+    // writes a tunnel_log row referencing the user — so we have to
+    // strip those refs before we can remove the user. Otherwise the
+    // DELETE silently fails and the row leaks into the shared CI DB.
+    let _ = sqlx::query("DELETE FROM tunnel_log WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&db.pg)
+        .await;
     let _ = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&db.pg)
