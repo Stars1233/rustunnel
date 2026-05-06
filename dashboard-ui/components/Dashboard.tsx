@@ -7,6 +7,7 @@ import { loadRegions, regionApiUrl } from '@/lib/regions';
 import { useTunnels } from '@/hooks/useTunnels';
 import { useGroups } from '@/hooks/useGroups';
 import { useRequests } from '@/hooks/useRequests';
+import { useHealthEvents } from '@/hooks/useHealthEvents';
 import { useRegionHealth } from '@/hooks/useRegionHealth';
 import { AuthGate } from './AuthGate';
 import { Header } from './Header';
@@ -17,6 +18,7 @@ import { RequestList } from './RequestList';
 import { RequestDetail } from './RequestDetail';
 import { TokensPanel } from './TokensPanel';
 import { TunnelHistoryPanel } from './TunnelHistoryPanel';
+import { HealthTimeline } from './HealthTimeline';
 import { useTokens } from '@/hooks/useTokens';
 
 export default function Dashboard() {
@@ -65,6 +67,10 @@ export default function Dashboard() {
   }, [selectedTunnel, regionApis, primaryApi]);
 
   const { requests } = useRequests(selectedTunnelApi, selectedTunnel?.tunnel_id ?? null);
+  const { events: healthEvents } = useHealthEvents(
+    selectedTunnelApi,
+    selectedTunnel?.tunnel_id ?? null
+  );
   const { tokens, error: tokenErr, refresh: refreshTokens } = useTokens(primaryApi, !!token);
 
   // Deselect tunnel if it disappears.
@@ -167,6 +173,16 @@ export default function Dashboard() {
             onClose={handleClose}
           />
         </Panel>
+
+        {/* Health timeline (TUNNEL-8 Phase 5) — only renders for tunnels
+            that have at least one recorded transition. Solo tunnels with
+            no probe configured show no events here, so the section
+            self-hides via `HealthTimeline` returning null. */}
+        {selectedTunnel && healthEvents.length > 0 && (
+          <Panel title={`Health timeline — ${selectedTunnel.public_url}`}>
+            <HealthTimeline events={healthEvents} />
+          </Panel>
+        )}
 
         {/* Request inspector */}
         {selectedTunnel && (

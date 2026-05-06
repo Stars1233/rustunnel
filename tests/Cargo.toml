@@ -66,3 +66,15 @@ path = "integration/tcp_groups.rs"
 [[test]]
 name = "health_checks"
 path = "integration/health_checks.rs"
+
+[[test]]
+name = "version_gate"
+path = "integration/version_gate.rs"
+
+[[test]]
+name = "alert_webhook"
+path = "integration/alert_webhook.rs"
+
+[[test]]
+name = "group_events_sse"
+path = "integration/group_events_sse.rs"

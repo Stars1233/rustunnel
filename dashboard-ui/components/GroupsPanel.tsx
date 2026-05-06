@@ -282,6 +282,14 @@ function MemberRow({
             probe:{member.health_check_kind}
           </span>
         )}
+        {member.has_alert_webhook && (
+          <span
+            style={{ marginLeft: 6, fontSize: 11 }}
+            title="Per-tenant alert webhook configured — fires on group 0/N transitions"
+          >
+            🔔
+          </span>
+        )}
       </span>
       <span style={{ color: 'var(--text)' }} title={`${member.request_count} dispatches`}>
         {member.request_count.toLocaleString()} ({share}%)

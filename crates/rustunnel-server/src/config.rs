@@ -17,12 +17,32 @@ pub struct ServerConfig {
     /// P2P direct connection settings.
     #[serde(default)]
     pub p2p: P2pSection,
+    /// Test-only knobs. Used by the integration suite to simulate
+    /// older edges (Phase 6 cross-version matrix). **Production
+    /// deployments must leave this section out.**
+    #[serde(default)]
+    pub testing: TestingSection,
     /// Load-balancing kill switch (TUNNEL-7, Phase 6 of the plan).
     /// When `false` (default), grouped registrations fall through and behave
     /// as solo tunnels exactly like today — protocol fields are accepted but
     /// not honoured. Flip per region during the EU → US → AP rollout.
     #[serde(default)]
     pub load_balancing: LoadBalancingSection,
+}
+
+/// Test-only knobs. Adding a `[testing]` section to `server.toml` is a
+/// supported way for the integration suite to simulate older edges so we
+/// can verify the v0.7.0 client's TUNNEL-7 Phase 6 fall-through behaviour
+/// (skip group fields, skip probe loop) against an old `server_version`.
+/// Production configs **must not** include this section.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TestingSection {
+    /// Override the `server_version` advertised in the `AuthOk` frame.
+    /// `None` (the default) → use `CARGO_PKG_VERSION`. Set to a string
+    /// like `"0.5.0"` in tests to make the server pretend to be an older
+    /// edge.
+    #[serde(default)]
+    pub override_server_version: Option<String>,
 }
 
 /// Per-region kill switch and tunables for group-based load balancing.
@@ -37,6 +57,28 @@ pub struct LoadBalancingSection {
     /// `(subdomain, group_key_hash)` form one pool with random dispatch.
     #[serde(default)]
     pub enabled: bool,
+
+    /// Optional webhook URL for "0 healthy members" alerts (TUNNEL-8 Phase 5).
+    /// When set, the server POSTs a JSON payload to this URL whenever a
+    /// load-balancing group transitions to having zero healthy members.
+    /// Debounced — fires once per transition, not per frame. Empty / unset
+    /// disables the alert. Best-effort delivery (5s timeout, no retry).
+    ///
+    /// Example payload:
+    /// ```json
+    /// {
+    ///   "event": "group_zero_healthy",
+    ///   "region_id": "eu",
+    ///   "protocol": "http",
+    ///   "label": "pool",
+    ///   "group_name": "web",
+    ///   "key_hash_short": "deadbeef",
+    ///   "member_count": 2,
+    ///   "at": "2026-05-03T18:24:55+00:00"
+    /// }
+    /// ```
+    #[serde(default)]
+    pub alert_webhook_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -319,6 +361,7 @@ impl Default for ServerConfig {
             },
             p2p: P2pSection::default(),
             load_balancing: LoadBalancingSection::default(),
+            testing: TestingSection::default(),
         }
     }
 }

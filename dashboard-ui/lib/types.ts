@@ -69,6 +69,13 @@ export interface TunnelGroupMember {
   connected_since: string;
   /** Probe type when the member opted into health checks (`tcp` / `http`). */
   health_check_kind?: string;
+  /**
+   * `true` if this member registered with a per-tenant
+   * `health_check.alert_webhook` URL. The URL itself is intentionally
+   * server-side only (privacy) — the dashboard renders a 🔔 presence
+   * indicator from this boolean.
+   */
+  has_alert_webhook: boolean;
 }
 
 export interface CapturedRequest {

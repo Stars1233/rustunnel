@@ -261,11 +261,19 @@ where
         token_id: Some(token_id),
     });
 
+    // The override only triggers when an integration test sets it via
+    // `[testing] override_server_version` in the test harness. Production
+    // configs leave this `None` and we report `CARGO_PKG_VERSION`.
+    let server_version = config
+        .testing
+        .override_server_version
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     send_frame(
         &mut ws,
         &ControlFrame::AuthOk {
             session_id,
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            server_version,
         },
     )
     .await?;
@@ -1177,6 +1185,36 @@ where
                             %session_id, %tunnel_id, %reason,
                             "tunnel marked unhealthy"
                         );
+                        // TUNNEL-8 Phase 5: did this transition take the
+                        // *group* to 0 healthy members? If so, fan the
+                        // alert out to:
+                        //   1. The operator-side `[load_balancing]
+                        //      alert_webhook_url` from server.toml —
+                        //      one destination, fires on every group
+                        //      going down. Useful for self-host + ops.
+                        //   2. Each unique per-tenant
+                        //      `health_check.alert_webhook` URL the
+                        //      affected group's members supplied at
+                        //      registration. Tenants own their own
+                        //      destinations — addressable Slack /
+                        //      PagerDuty for "*my* group went down"
+                        //      rather than the operator catch-all.
+                        // Both are debounced via the same
+                        // `zero_healthy_alerted` flag, so we fire each
+                        // URL once per transition regardless of how
+                        // many `TunnelUnhealthy` frames keep arriving
+                        // afterwards. Spawned in detached tasks so a
+                        // slow webhook can't block frame processing.
+                        if let Some(alert) =
+                            core.pop_zero_healthy_alert(&tunnel_id, &config.region.id)
+                        {
+                            if let Some(url) = config.load_balancing.alert_webhook_url.as_deref() {
+                                spawn_zero_healthy_alert(url.to_string(), alert.payload.clone());
+                            }
+                            for url in alert.tenant_webhook_urls {
+                                spawn_zero_healthy_alert(url, alert.payload.clone());
+                            }
+                        }
                     }
                 }
                 Some(other_owner) => {
@@ -1388,4 +1426,58 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+// ── load-balancing alert webhook (TUNNEL-8 Phase 5) ───────────────────────────
+
+/// Fire the "group X has 0 healthy members" webhook in a detached task.
+/// Best-effort — 5s timeout, no retry. Logs a warning on non-2xx so
+/// operators can see misconfigured webhook URLs in the journal.
+fn spawn_zero_healthy_alert(url: String, payload: crate::core::GroupAlertPayload) {
+    tokio::spawn(async move {
+        let body = serde_json::json!({
+            "event": "group_zero_healthy",
+            "region_id": payload.region_id,
+            "protocol": payload.protocol,
+            "label": payload.label,
+            "group_name": payload.group_name,
+            "key_hash_short": payload.key_hash_short,
+            "member_count": payload.member_count,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok();
+        let Some(client) = client else {
+            tracing::warn!("alert webhook: failed to build reqwest client");
+            return;
+        };
+        match client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(
+                    %url,
+                    group = %payload.group_name,
+                    label = %payload.label,
+                    "0-healthy alert delivered"
+                );
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    %url,
+                    status = %resp.status(),
+                    group = %payload.group_name,
+                    "0-healthy alert webhook returned non-2xx"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %url,
+                    error = %e,
+                    group = %payload.group_name,
+                    "0-healthy alert webhook send failed"
+                );
+            }
+        }
+    });
 }

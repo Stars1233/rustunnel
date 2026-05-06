@@ -44,6 +44,26 @@ pub struct HealthCheckSpec {
     /// When true (default), only HTTP 2xx responses count as healthy.
     #[serde(default = "default_http_expect_2xx")]
     pub http_expect_2xx: bool,
+    /// Optional per-tunnel webhook URL the server should POST to when
+    /// the *group* this member belongs to transitions to 0 healthy
+    /// members (TUNNEL-8 Phase 5 follow-up).
+    ///
+    /// Distinct from the operator-side `[load_balancing] alert_webhook_url`
+    /// in `server.toml` — that one fires for every group on the edge so
+    /// the operator can see "something on my fleet went down". This one
+    /// fires only for the group containing this member, so each *tenant*
+    /// gets their own page-the-on-call destination.
+    ///
+    /// Hashed-by-uniqueness server-side: if multiple members of the
+    /// same group all carry the same URL (typical — one tenant, one
+    /// destination), the server fires it once per transition. Different
+    /// URLs across members all fire (rare — multiple tenants sharing a
+    /// pool, see plan §4.6).
+    ///
+    /// Older clients (< 0.7.x w/ this field) never send it. Older
+    /// servers (< current) deserialise the field as `None` and drop it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert_webhook_url: Option<String>,
 }
 
 fn default_http_expect_2xx() -> bool {
@@ -247,6 +267,7 @@ mod tests {
                 max_failed: 3,
                 http_path: Some("/status".into()),
                 http_expect_2xx: true,
+                alert_webhook_url: Some("https://hooks.example.com/tenant-A".into()),
             }),
         };
         let bytes = encode_frame(&frame);
@@ -263,6 +284,12 @@ mod tests {
                 let spec = health_check.expect("health spec preserved");
                 assert_eq!(spec.kind, HealthCheckKind::Http);
                 assert_eq!(spec.http_path.as_deref(), Some("/status"));
+                // Round-trip the per-tenant webhook URL too (added in
+                // the Phase 5 webhook redesign).
+                assert_eq!(
+                    spec.alert_webhook_url.as_deref(),
+                    Some("https://hooks.example.com/tenant-A")
+                );
             }
             other => panic!("unexpected frame: {other:?}"),
         }

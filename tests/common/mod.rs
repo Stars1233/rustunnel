@@ -151,6 +151,35 @@ pub fn generate_test_cert(dir: &TempDir) -> (String, String) {
 
 // ── TestServer ────────────────────────────────────────────────────────────────
 
+/// Builder-style options for spinning up a `TestServer`. Add new test-only
+/// knobs here rather than growing the positional `start_on_ports` arg list.
+///
+/// Sensible defaults via `TestServerOpts::default()` aren't useful since
+/// the port fields would clash across parallel tests; helper constructors
+/// (`TestServer::start`, `start_with`, `start_with_load_balancing`)
+/// allocate fresh ports and pass them in.
+pub struct TestServerOpts {
+    pub control_port: u16,
+    pub http_port: u16,
+    pub https_port: u16,
+    pub dashboard_port: u16,
+    pub tcp_port_range: [u16; 2],
+    pub udp_port_range: [u16; 2],
+    pub require_auth: bool,
+    pub admin_token: String,
+    pub load_balancing_enabled: bool,
+    /// Phase 5 alert webhook URL — when `Some`, the server POSTs a
+    /// `group_zero_healthy` payload here whenever a load-balancing group
+    /// transitions to 0 healthy members.
+    pub alert_webhook_url: Option<String>,
+    /// Phase 6 cross-version test override — when `Some`, the server
+    /// reports this string in `AuthOk.server_version` instead of
+    /// `CARGO_PKG_VERSION`. Lets us simulate older edges so we can verify
+    /// the client's version-gate falls through to solo registration
+    /// without spamming `decode_frame` warnings.
+    pub server_version_override: Option<String>,
+}
+
 /// A running server instance with all components live on random ports.
 pub struct TestServer {
     pub control_port: u16,
@@ -266,6 +295,40 @@ impl TestServer {
         admin_token: &str,
         load_balancing_enabled: bool,
     ) -> Self {
+        Self::start_with_opts(TestServerOpts {
+            control_port,
+            http_port,
+            https_port,
+            dashboard_port,
+            tcp_port_range,
+            udp_port_range,
+            require_auth,
+            admin_token: admin_token.to_string(),
+            load_balancing_enabled,
+            alert_webhook_url: None,
+            server_version_override: None,
+        })
+        .await
+    }
+
+    /// Builder-style entry point so new test-only knobs (Phase 5 alert
+    /// webhook, Phase 6 server-version override, …) can be added without
+    /// growing the positional-arg list. Existing helpers wrap this.
+    pub async fn start_with_opts(opts: TestServerOpts) -> Self {
+        let TestServerOpts {
+            control_port,
+            http_port,
+            https_port,
+            dashboard_port,
+            tcp_port_range,
+            udp_port_range,
+            require_auth,
+            admin_token,
+            load_balancing_enabled,
+            alert_webhook_url,
+            server_version_override,
+        } = opts;
+        let admin_token = admin_token.as_str();
         let [tcp_low, tcp_high] = tcp_port_range;
 
         let temp_dir = TempDir::new().expect("temp dir");
@@ -328,6 +391,10 @@ impl TestServer {
             },
             load_balancing: rustunnel_server::config::LoadBalancingSection {
                 enabled: load_balancing_enabled,
+                alert_webhook_url: alert_webhook_url.clone(),
+            },
+            testing: rustunnel_server::config::TestingSection {
+                override_server_version: server_version_override.clone(),
             },
         });
 
@@ -489,6 +556,11 @@ type CtrlWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 pub struct TestClient {
     ws: CtrlWs,
     pub session_id: Option<Uuid>,
+    /// `server_version` field captured from `AuthOk`. Lets Phase 6 tests
+    /// verify the server's `[testing] override_server_version` knob is
+    /// taking effect — the client's version-gate logic itself is
+    /// unit-tested in `rustunnel-client::version::tests`.
+    pub server_version: Option<String>,
 }
 
 impl TestClient {
@@ -505,6 +577,7 @@ impl TestClient {
         let mut client = Self {
             ws,
             session_id: None,
+            server_version: None,
         };
 
         // Send Auth frame.
@@ -517,8 +590,12 @@ impl TestClient {
 
         // Receive response.
         match client.recv_timeout(Duration::from_secs(5)).await? {
-            ControlFrame::AuthOk { session_id, .. } => {
+            ControlFrame::AuthOk {
+                session_id,
+                server_version,
+            } => {
                 client.session_id = Some(session_id);
+                client.server_version = Some(server_version);
                 Ok(client)
             }
             ControlFrame::AuthError { message } => Err(format!("AuthError: {message}")),
@@ -546,6 +623,7 @@ impl TestClient {
         let mut client = Self {
             ws,
             session_id: None,
+            server_version: None,
         };
 
         client
@@ -583,6 +661,59 @@ impl TestClient {
             reason: reason.to_string(),
         })
         .await
+    }
+
+    /// Register an HTTP tunnel as part of a load-balancing group, with
+    /// an optional per-tenant alert webhook URL. The webhook URL is
+    /// part of `HealthCheckSpec` on the wire, so this helper attaches
+    /// a minimal TCP probe spec carrying just the URL — Phase 5 fan-out
+    /// tests use this to drive the server's per-tenant alert path.
+    pub async fn register_http_tunnel_grouped_with_alert(
+        &mut self,
+        subdomain: Option<&str>,
+        group_name: &str,
+        group_key_hash: &str,
+        alert_webhook_url: Option<&str>,
+    ) -> Result<(Uuid, String, String), String> {
+        let health_check = alert_webhook_url.map(|url| rustunnel_protocol::HealthCheckSpec {
+            kind: rustunnel_protocol::HealthCheckKind::Tcp,
+            interval_secs: 10,
+            timeout_secs: 3,
+            max_failed: 3,
+            http_path: None,
+            http_expect_2xx: true,
+            alert_webhook_url: Some(url.to_string()),
+        });
+        let req_id = Uuid::new_v4().to_string();
+        self.send(&ControlFrame::RegisterTunnel {
+            request_id: req_id.clone(),
+            protocol: TunnelProtocol::Http,
+            subdomain: subdomain.map(str::to_string),
+            local_addr: "127.0.0.1:0".to_string(),
+            p2p_secret_hash: None,
+            p2p_name: None,
+            group: Some(group_name.to_string()),
+            group_key_hash: Some(group_key_hash.to_string()),
+            health_check,
+        })
+        .await?;
+        match self.recv_timeout(Duration::from_secs(5)).await? {
+            ControlFrame::TunnelRegistered {
+                tunnel_id,
+                public_url,
+                ..
+            } => {
+                let sub = public_url
+                    .trim_start_matches("http://")
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                Ok((tunnel_id, sub, public_url))
+            }
+            ControlFrame::TunnelError { message, .. } => Err(format!("TunnelError: {message}")),
+            other => Err(format!("unexpected frame: {other:?}")),
+        }
     }
 
     /// Register an HTTP tunnel as part of a load-balancing group.
