@@ -253,7 +253,8 @@ where
 
     let token_id = token.clone();
     let db_token_id = db_token.as_ref().map(|t| t.id.clone());
-    let session_id = core.register_session(peer_addr, token, db_token_id, ctrl_tx);
+    let user_id = db_token.as_ref().and_then(|t| t.user_id);
+    let session_id = core.register_session(peer_addr, token, db_token_id, user_id, ctrl_tx);
 
     let _ = audit_tx.try_send(AuditEvent::AuthAttempt {
         peer: peer_addr.to_string(),

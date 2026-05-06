@@ -327,7 +327,12 @@ without polling all of `/api/tunnels`:
   consumer fell behind — resync via `/api/groups`.
 
 Both endpoints are gated by the same auth as `/api/tunnels` (admin
-token or DB token).
+token or DB token), and they apply the same per-tenant scope: a
+user-scoped DB token sees only groups containing at least one of its
+own members; aggregate counters reflect just the visible members.
+Groups the caller can't see return `404` rather than `403` so existence
+isn't leaked. See `docs/api-reference.md` § "Visibility scope" for the
+full rules.
 
 ---
 

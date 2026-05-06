@@ -78,3 +78,7 @@ path = "integration/alert_webhook.rs"
 [[test]]
 name = "group_events_sse"
 path = "integration/group_events_sse.rs"
+
+[[test]]
+name = "dashboard_scope"
+path = "integration/dashboard_scope.rs"

@@ -16,8 +16,20 @@ Two token types are accepted:
 
 | Type | Value | Notes |
 |------|-------|-------|
-| Admin token | Value of `auth.admin_token` in `server.toml` | Full access |
-| API token | Raw UUID returned at token creation time | Same access as admin token today; scope enforcement planned |
+| Admin token | Value of `auth.admin_token` in `server.toml` | Full access — sees every tunnel and group across every tenant |
+| API token | Raw UUID returned at token creation time | Tenant-scoped (TUNNEL-1) — see "Visibility scope" below |
+
+### Visibility scope
+
+`/api/tunnels`, `/api/tunnels/:id`, `/api/tunnels/:id/*`, `/api/groups`, and `/api/groups/:protocol/:label/events` are filtered by the caller's identity:
+
+- **Admin token** — every tunnel and group in the region.
+- **API token with an owning user** (`tokens.user_id IS NOT NULL`, the platform-issued tokens) — only tunnels whose owning sessions are authenticated against tokens belonging to the same `user_id`. A user listing `/api/tunnels` sees all of *their* tunnels even when they're spread across multiple tokens or multiple clients.
+- **API token without an owning user** (legacy / admin-issued tokens, e.g. the bootstrap "agent" tokens that predate the platform-api) — only tunnels opened by sessions authenticated with that exact token.
+
+`DELETE /api/tunnels/:id` honours the same scope: a tenant cannot force-close another tenant's tunnel. `/api/groups` aggregate counters (`member_count`, `healthy_count`, `total_dispatches`, …) reflect only the members the caller is allowed to see.
+
+Tunnels and groups the caller can't see return **404 Not Found** rather than `403`, so existence isn't leaked.
 
 **Error responses**
 

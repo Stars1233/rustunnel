@@ -345,6 +345,12 @@ pub struct SessionInfo {
     /// The `tokens.id` (UUID) of the authenticated token, if it came from the DB.
     /// `None` for the admin token or when auth is disabled.
     pub db_token_id: Option<String>,
+    /// `tokens.user_id` of the authenticated token. `None` for the admin
+    /// token, for legacy / admin-issued DB tokens with no owning user, and
+    /// when auth is disabled. Cached at session creation so the dashboard
+    /// API can scope `/api/tunnels` and `/api/groups` to a single tenant
+    /// without a per-request DB lookup.
+    pub user_id: Option<Uuid>,
     /// Channel for sending control messages to the session handler task.
     pub control_tx: mpsc::Sender<ControlMessage>,
     /// Tunnel IDs owned by this session.
@@ -362,6 +368,7 @@ impl SessionInfo {
         client_addr: SocketAddr,
         auth_token_id: String,
         db_token_id: Option<String>,
+        user_id: Option<Uuid>,
         control_tx: mpsc::Sender<ControlMessage>,
     ) -> Self {
         let now = Instant::now();
@@ -369,6 +376,7 @@ impl SessionInfo {
             client_addr,
             auth_token_id,
             db_token_id,
+            user_id,
             control_tx,
             tunnels: Vec::new(),
             connected_at: now,
