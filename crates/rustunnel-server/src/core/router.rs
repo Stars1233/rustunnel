@@ -17,13 +17,17 @@ use crate::error::{Error, Result};
 use super::ip_limiter::IpRateLimiter;
 use super::limiter::RateLimiter;
 use super::tunnel::{
-    ControlMessage, GroupMember, GroupSpec, SessionInfo, TcpTunnelEvent, TunnelGroup, TunnelInfo,
-    UdpTunnelEvent,
+    ControlMessage, GroupAlertPayload, GroupMember, GroupSpec, SessionInfo, TcpTunnelEvent,
+    TunnelGroup, TunnelInfo, UdpTunnelEvent, ZeroHealthyAlert,
 };
 
 /// Broadcast channel capacity for TCP/UDP tunnel lifecycle events.
 const TCP_EVENT_CAPACITY: usize = 64;
 const UDP_EVENT_CAPACITY: usize = 64;
+/// Capacity of the load-balancing group-event broadcast channel. Sized
+/// for bursty flapping; lagged subscribers fall back to the polling
+/// `/api/groups` endpoint to resync.
+const GROUP_EVENT_CAPACITY: usize = 256;
 
 // ── TunnelCore ────────────────────────────────────────────────────────────────
 
@@ -80,6 +84,13 @@ pub struct TunnelCore {
     pub rate_limiter: Arc<RateLimiter>,
     /// Per-source-IP sliding-window rate limiter.
     pub ip_limiter: Arc<IpRateLimiter>,
+    /// Broadcast channel for `GroupEvent`s emitted on every member health
+    /// transition. Drives the SSE endpoint
+    /// `GET /api/groups/:label/events`. A lagged subscriber gets a
+    /// `Lagged(n)` error and is expected to resync via `/api/groups`.
+    /// Capacity 256 keeps memory bounded under flapping while still
+    /// absorbing reasonable bursts.
+    group_events: broadcast::Sender<crate::core::tunnel::GroupEvent>,
 }
 
 /// A registered P2P publisher — subscribers connect to this by name.
@@ -140,6 +151,7 @@ impl TunnelCore {
         };
         let (tcp_events, _) = broadcast::channel(TCP_EVENT_CAPACITY);
         let (udp_events, _) = broadcast::channel(UDP_EVENT_CAPACITY);
+        let (group_events, _) = broadcast::channel(GROUP_EVENT_CAPACITY);
         Self {
             http_routes: DashMap::new(),
             tcp_routes: DashMap::new(),
@@ -157,7 +169,20 @@ impl TunnelCore {
             udp_events,
             rate_limiter: Arc::new(RateLimiter::new()),
             ip_limiter: Arc::new(IpRateLimiter::new(ip_rate_limit_rps)),
+            group_events,
         }
+    }
+
+    /// Subscribe to the live load-balancing group event stream.
+    ///
+    /// Returns a `broadcast::Receiver<GroupEvent>` that receives every
+    /// member health-bit transition across every group. Subscribers
+    /// filter on `(protocol, label)` themselves. Lagged subscribers
+    /// receive a `Lagged(n)` error and are expected to resync via
+    /// `/api/groups`. See `dashboard/api.rs::group_events_sse` for the
+    /// SSE endpoint that consumes this channel.
+    pub fn subscribe_group_events(&self) -> broadcast::Receiver<crate::core::tunnel::GroupEvent> {
+        self.group_events.subscribe()
     }
 
     // ── pending connection registry ───────────────────────────────────────────
@@ -734,22 +759,86 @@ impl TunnelCore {
     /// The caller is expected to gate this on session ownership — see the
     /// auth check in `control/session.rs`.
     pub fn set_tunnel_healthy(&self, tunnel_id: &Uuid) -> bool {
-        self.with_member(tunnel_id, |member| {
-            member.healthy.store(true, Ordering::Release);
+        let mut transitioned = false;
+        let updated = self.with_member(tunnel_id, |member| {
+            // Record only on the rising edge — steady-state Healthy
+            // reports would flood the ring.
+            let was_unhealthy = !member.healthy.swap(true, Ordering::AcqRel);
             member.consecutive_failures.store(0, Ordering::Release);
-        })
+            if was_unhealthy {
+                member.record_health_event(true, "recovered");
+                transitioned = true;
+            }
+        });
+        if updated {
+            if let Some(group) = self.group_for_tunnel(tunnel_id) {
+                // Recovery means the group has at least one healthy member
+                // again, so re-arm the "0 healthy" debounce.
+                group.zero_healthy_alerted.store(false, Ordering::Release);
+                if transitioned {
+                    self.broadcast_group_event(tunnel_id, &group, true, "recovered");
+                }
+            }
+        }
+        updated
     }
 
     /// Mark `tunnel_id` unhealthy and bump its failure counters.
     /// `reason` is a free-form string from the client used for dashboards.
     /// Returns `true` if the tunnel was found and updated.
     pub fn set_tunnel_unhealthy(&self, tunnel_id: &Uuid, reason: &str) -> bool {
-        self.with_member(tunnel_id, |member| {
-            member.healthy.store(false, Ordering::Release);
+        let mut transitioned = false;
+        let updated = self.with_member(tunnel_id, |member| {
+            let was_healthy = member.healthy.swap(false, Ordering::AcqRel);
             member.consecutive_failures.fetch_add(1, Ordering::Release);
             member.total_health_failures.fetch_add(1, Ordering::Relaxed);
+            // Record on the falling edge only. A repeated Unhealthy
+            // (server already had it as down) bumps the counter but
+            // doesn't add a new timeline entry.
+            if was_healthy {
+                member.record_health_event(false, reason);
+                transitioned = true;
+            }
             tracing::debug!(%tunnel_id, %reason, "tunnel marked unhealthy");
-        })
+        });
+        if updated && transitioned {
+            if let Some(group) = self.group_for_tunnel(tunnel_id) {
+                self.broadcast_group_event(tunnel_id, &group, false, reason);
+            }
+        }
+        updated
+    }
+
+    /// Push a `GroupEvent` onto the broadcast channel. Best-effort —
+    /// `send` returns an error iff there are no live subscribers, which
+    /// is fine. The send-failure path doesn't propagate up.
+    fn broadcast_group_event(
+        &self,
+        tunnel_id: &Uuid,
+        group: &Arc<TunnelGroup>,
+        healthy: bool,
+        reason: &str,
+    ) {
+        let key = match self.tunnel_index.get(tunnel_id).as_deref().cloned() {
+            Some(k) => k,
+            None => return,
+        };
+        let (protocol, label) = match key {
+            TunnelKey::Http(sub) => ("http", sub),
+            TunnelKey::Tcp(port) => ("tcp", port.to_string()),
+            TunnelKey::Udp(port) => ("udp", port.to_string()),
+            TunnelKey::P2p(_) => return,
+        };
+        let event = crate::core::tunnel::GroupEvent {
+            protocol: protocol.to_string(),
+            label,
+            tunnel_id: *tunnel_id,
+            healthy,
+            reason: reason.to_string(),
+            healthy_count: group.healthy_count(),
+            member_count: group.members.len(),
+        };
+        let _ = self.group_events.send(event);
     }
 
     /// Resolve `tunnel_id` to its `GroupMember` (across http/tcp/udp routes)
@@ -774,6 +863,87 @@ impl TunnelCore {
         };
         f(&member);
         true
+    }
+
+    /// Resolve `tunnel_id` to its owning `Arc<TunnelGroup>` (HTTP/TCP/UDP).
+    /// Returns `None` for unknown tunnels and for P2P (which doesn't
+    /// participate in load-balancing groups).
+    pub fn group_for_tunnel(&self, tunnel_id: &Uuid) -> Option<Arc<TunnelGroup>> {
+        let key = self.tunnel_index.get(tunnel_id).as_deref().cloned()?;
+        match key {
+            TunnelKey::Http(sub) => self.http_routes.get(&sub).map(|g| Arc::clone(&g)),
+            TunnelKey::Tcp(port) => self.tcp_routes.get(&port).map(|g| Arc::clone(&g)),
+            TunnelKey::Udp(port) => self.udp_routes.get(&port).map(|g| Arc::clone(&g)),
+            TunnelKey::P2p(_) => None,
+        }
+    }
+
+    /// If the group containing `tunnel_id` has just transitioned to 0
+    /// healthy members AND we haven't already fired an alert for this
+    /// transition, return a payload describing the affected group.
+    /// Subsequent calls return `None` until any member becomes healthy
+    /// again (which clears the debounce in `set_tunnel_healthy`).
+    ///
+    /// `region_id` is supplied by the caller because the router doesn't
+    /// know what region it's running in.
+    pub fn pop_zero_healthy_alert(
+        &self,
+        tunnel_id: &Uuid,
+        region_id: &str,
+    ) -> Option<ZeroHealthyAlert> {
+        let group = self.group_for_tunnel(tunnel_id)?;
+        // Only multi-member groups can meaningfully have "0 healthy" —
+        // a solo tunnel going unhealthy isn't an LB transition.
+        group.key_hash.as_ref()?;
+        if group.healthy_count() != 0 {
+            return None;
+        }
+        // Atomically arm the debounce. If we lose the race (another flip
+        // already armed it), don't re-fire.
+        if group
+            .zero_healthy_alerted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        // Determine protocol + label from the routing table key.
+        let key = self.tunnel_index.get(tunnel_id).as_deref().cloned()?;
+        let (protocol, label) = match key {
+            TunnelKey::Http(sub) => ("http", sub),
+            TunnelKey::Tcp(port) => ("tcp", port.to_string()),
+            TunnelKey::Udp(port) => ("udp", port.to_string()),
+            TunnelKey::P2p(_) => return None,
+        };
+        let key_hash_short = group
+            .key_hash
+            .as_deref()
+            .map(|kh| kh.chars().take(8).collect::<String>())
+            .unwrap_or_default();
+        // Collect unique per-tenant webhook URLs from members' specs.
+        // Insertion order is preserved so we don't shuffle delivery on
+        // every alert (helps log correlation).
+        let mut tenant_webhook_urls: Vec<String> = Vec::new();
+        for member in group.members.iter() {
+            if let Some(spec) = member.health_spec.as_ref() {
+                if let Some(url) = spec.alert_webhook_url.as_deref() {
+                    if !tenant_webhook_urls.iter().any(|u| u == url) {
+                        tenant_webhook_urls.push(url.to_string());
+                    }
+                }
+            }
+        }
+        Some(ZeroHealthyAlert {
+            payload: GroupAlertPayload {
+                region_id: region_id.to_string(),
+                protocol: protocol.to_string(),
+                label,
+                group_name: group.name.clone(),
+                key_hash_short,
+                member_count: group.members.len(),
+            },
+            tenant_webhook_urls,
+        })
     }
 
     /// Look up the session that owns `tunnel_id`. Used by the frame handler
@@ -1968,6 +2138,7 @@ mod tests {
                 max_failed: 3,
                 http_path: None,
                 http_expect_2xx: true,
+                alert_webhook_url: None,
             }),
         };
         let (tid, _) = core

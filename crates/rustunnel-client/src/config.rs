@@ -100,6 +100,13 @@ pub struct HealthCheckConfig {
     /// Whether HTTP probes accept only 2xx (default `true`).
     #[serde(default = "default_expect_2xx")]
     pub expect_2xx: bool,
+    /// Optional per-tunnel alert webhook URL. When set, the server
+    /// POSTs a `group_zero_healthy` payload here whenever the
+    /// load-balancing group this tunnel belongs to transitions to 0
+    /// healthy members. Set this to your own Slack / PagerDuty / etc.
+    /// destination — separate from the operator-side
+    /// `[load_balancing] alert_webhook_url` on the edge.
+    pub alert_webhook: Option<String>,
 }
 
 fn default_interval() -> u32 {

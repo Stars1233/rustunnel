@@ -71,7 +71,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tunnels/:id", delete(force_close_tunnel))
         .route("/api/tunnels/:id/requests", get(tunnel_requests))
         .route("/api/tunnels/:id/replay/:request_id", post(replay_request))
+        .route("/api/tunnels/:id/health-events", get(tunnel_health_events))
         .route("/api/groups", get(list_groups))
+        .route("/api/groups/:protocol/:label/events", get(group_events_sse))
         .route("/api/tokens", get(list_tokens).post(create_token))
         .route("/api/tokens/:id", delete(delete_token))
         .route("/api/history", get(tunnel_history))
@@ -570,6 +572,79 @@ async fn get_tunnel(
     not_found("tunnel not found").into_response()
 }
 
+// ── health-event timeline (TUNNEL-8 Phase 5) ────────────────────────────────
+
+#[derive(Serialize)]
+struct HealthEventRow {
+    /// RFC-3339 UTC timestamp of the transition.
+    at: String,
+    healthy: bool,
+    reason: String,
+}
+
+/// `GET /api/tunnels/:id/health-events` — recent health-state transitions
+/// for a single tunnel (whichever protocol it lives under). Returns
+/// oldest → newest, capped at `HEALTH_EVENT_RING_SIZE` (50). 404 when the
+/// tunnel doesn't exist or is a P2P tunnel (P2P doesn't participate in
+/// load balancing and has no probe state).
+async fn tunnel_health_events(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&headers, &state).await {
+        return e.into_response();
+    }
+
+    let tunnel_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => return not_found("invalid tunnel id").into_response(),
+    };
+
+    // Walk the routing tables to find this tunnel's GroupMember and
+    // snapshot its ring. Same shape as `get_tunnel`.
+    let snapshot = find_member_health_events(&state.core, &tunnel_id);
+    match snapshot {
+        Some(events) => {
+            let rows: Vec<HealthEventRow> = events
+                .into_iter()
+                .map(|e| HealthEventRow {
+                    at: chrono::DateTime::<chrono::Utc>::from(e.at).to_rfc3339(),
+                    healthy: e.healthy,
+                    reason: e.reason,
+                })
+                .collect();
+            Json(rows).into_response()
+        }
+        None => not_found("tunnel not found").into_response(),
+    }
+}
+
+/// Resolve `tunnel_id` to its `GroupMember` and return a snapshot of the
+/// member's health-event ring. None if the tunnel is unknown or a P2P
+/// publisher (which doesn't have a `GroupMember`).
+fn find_member_health_events(
+    core: &crate::core::TunnelCore,
+    tunnel_id: &uuid::Uuid,
+) -> Option<Vec<crate::core::HealthEvent>> {
+    for entry in core.http_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.health_events_snapshot());
+        }
+    }
+    for entry in core.tcp_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.health_events_snapshot());
+        }
+    }
+    for entry in core.udp_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.health_events_snapshot());
+        }
+    }
+    None
+}
+
 // ── load-balancing groups (TUNNEL-8 Phase 5) ────────────────────────────────
 
 /// One member's contribution inside a `GroupSummary` row. Subset of
@@ -591,6 +666,12 @@ struct GroupMemberSummary {
     /// when the member didn't opt into health checks.
     #[serde(skip_serializing_if = "Option::is_none")]
     health_check_kind: Option<String>,
+    /// Whether this member registered with a per-tenant
+    /// `health_check.alert_webhook` URL. We expose presence only — the
+    /// URL itself stays server-side so a dashboard viewer can't exfil
+    /// another tenant's notification destination. The 🔔 indicator on
+    /// the member row reads from this.
+    has_alert_webhook: bool,
 }
 
 /// One row per active multi-member group across HTTP and TCP.
@@ -695,6 +776,11 @@ fn group_to_summary(
             rustunnel_protocol::HealthCheckKind::Tcp => "tcp".to_string(),
             rustunnel_protocol::HealthCheckKind::Http => "http".to_string(),
         });
+        let has_alert_webhook = m
+            .health_spec
+            .as_ref()
+            .and_then(|s| s.alert_webhook_url.as_deref())
+            .is_some();
         members.push(GroupMemberSummary {
             tunnel_id: info.tunnel_id.to_string(),
             session_id: info.session_id.to_string(),
@@ -706,6 +792,7 @@ fn group_to_summary(
             total_health_failures: failures,
             connected_since: instant_to_iso(info.created_at),
             health_check_kind,
+            has_alert_webhook,
         });
     }
     GroupSummary {
@@ -721,6 +808,69 @@ fn group_to_summary(
         total_health_failures,
         members,
     }
+}
+
+// ── /api/groups/:protocol/:label/events — SSE (TUNNEL-8 Phase 5) ────────────
+
+/// Live event stream for a single load-balancing group.
+///
+/// Subscribes to the global `group_events` broadcast channel and filters
+/// to events matching `(protocol, label)`. Each event is serialised as
+/// JSON and emitted as a default-named SSE event. A 30s keep-alive ping
+/// keeps proxies from idle-closing the connection. The stream survives
+/// across member churn — when the group has no members the stream stays
+/// open but goes silent until the group is recreated.
+///
+/// On a `Lagged(n)` error from the broadcast channel (subscriber fell
+/// behind because the producer outran the consumer), the stream emits a
+/// `lagged` event with the dropped count and continues. Clients that
+/// see a `lagged` event should resync via `GET /api/groups`.
+async fn group_events_sse(
+    headers: HeaderMap,
+    State(state): State<ApiState>,
+    Path((protocol, label)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&headers, &state).await {
+        return e.into_response();
+    }
+
+    let receiver = state.core.subscribe_group_events();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(receiver);
+    let proto = protocol;
+    let lbl = label;
+    let filtered = futures_util::StreamExt::filter_map(stream, move |result| {
+        let proto = proto.clone();
+        let lbl = lbl.clone();
+        async move {
+            match result {
+                Ok(event) => {
+                    if event.protocol == proto && event.label == lbl {
+                        let payload = serde_json::to_string(&event).ok()?;
+                        Some(Ok::<_, std::convert::Infallible>(
+                            axum::response::sse::Event::default()
+                                .event("group_event")
+                                .data(payload),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    Some(Ok(axum::response::sse::Event::default()
+                        .event("lagged")
+                        .data(n.to_string())))
+                }
+            }
+        }
+    });
+
+    axum::response::sse::Sse::new(filtered)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 // ── captured requests ─────────────────────────────────────────────────────────

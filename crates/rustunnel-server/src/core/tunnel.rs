@@ -1,15 +1,36 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::io::DuplexStream;
 use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 use rustunnel_protocol::{HealthCheckSpec, TunnelProtocol};
+
+/// Maximum number of recent health-state transitions kept per member.
+/// Capped so a flapping backend can't grow the ring unboundedly. Older
+/// events are evicted FIFO.
+pub const HEALTH_EVENT_RING_SIZE: usize = 50;
+
+/// One health-state transition for a `GroupMember`. Timestamps are
+/// captured at the moment the bit flips on the server side. `reason` is
+/// the string carried by `TunnelUnhealthy` (or `"recovered"` for a flip
+/// to healthy, or `"registered"` for the very first event when a member
+/// with a `health_check` spec comes online).
+#[derive(Debug, Clone)]
+pub struct HealthEvent {
+    /// `SystemTime` at the moment the flip happened. Carried alongside
+    /// `Instant` because `Instant` isn't serialisable / human-readable;
+    /// `SystemTime` is what dashboards display.
+    pub at: SystemTime,
+    pub healthy: bool,
+    pub reason: String,
+}
 
 // ── TCP tunnel events (edge ↔ core) ───────────────────────────────────────────
 
@@ -100,6 +121,12 @@ pub struct GroupMember {
     /// counter (Phase 5). Never resets while the member is registered;
     /// goes away when the member leaves the group.
     pub total_health_failures: AtomicU64,
+    /// Ring buffer of recent health-state transitions (TUNNEL-8 Phase 5).
+    /// Capped at `HEALTH_EVENT_RING_SIZE`; older events are evicted FIFO.
+    /// Only edges are recorded — not every `TunnelHealthy` probe report.
+    /// Surfaced via `GET /api/tunnels/:id/health-events` and the per-tunnel
+    /// health timeline on both dashboards.
+    pub health_events: Mutex<VecDeque<HealthEvent>>,
 }
 
 impl GroupMember {
@@ -112,6 +139,7 @@ impl GroupMember {
             health_spec: None,
             consecutive_failures: AtomicU32::new(0),
             total_health_failures: AtomicU64::new(0),
+            health_events: Mutex::new(VecDeque::with_capacity(HEALTH_EVENT_RING_SIZE)),
         }
     }
 
@@ -124,13 +152,49 @@ impl GroupMember {
     /// traffic to a backend whose upstream we haven't probed yet.
     pub fn with_health_spec(info: TunnelInfo, spec: Option<HealthCheckSpec>) -> Self {
         let initially_healthy = spec.is_none();
+        let mut events = VecDeque::with_capacity(HEALTH_EVENT_RING_SIZE);
+        // Seed an initial event so the timeline always shows when the
+        // member came online and what state it started in. "registered"
+        // is the synthetic reason for this T0 event.
+        events.push_back(HealthEvent {
+            at: SystemTime::now(),
+            healthy: initially_healthy,
+            reason: if initially_healthy {
+                "registered".into()
+            } else {
+                "registered (awaiting first probe)".into()
+            },
+        });
         Self {
             info,
             healthy: AtomicBool::new(initially_healthy),
             health_spec: spec,
             consecutive_failures: AtomicU32::new(0),
             total_health_failures: AtomicU64::new(0),
+            health_events: Mutex::new(events),
         }
+    }
+
+    /// Append a transition to the ring buffer. Called from
+    /// `set_tunnel_healthy` / `set_tunnel_unhealthy` only when the bit
+    /// actually flipped — steady-state probe reports don't generate
+    /// events. Evicts the oldest entry when the buffer is full.
+    pub fn record_health_event(&self, healthy: bool, reason: impl Into<String>) {
+        let mut ring = self.health_events.lock();
+        if ring.len() >= HEALTH_EVENT_RING_SIZE {
+            ring.pop_front();
+        }
+        ring.push_back(HealthEvent {
+            at: SystemTime::now(),
+            healthy,
+            reason: reason.into(),
+        });
+    }
+
+    /// Snapshot the current ring contents (newest last). Returned as a
+    /// fresh `Vec` so the lock is released before the caller serialises.
+    pub fn health_events_snapshot(&self) -> Vec<HealthEvent> {
+        self.health_events.lock().iter().cloned().collect()
     }
 }
 
@@ -145,6 +209,12 @@ pub struct TunnelGroup {
     pub key_hash: Option<String>,
     /// Members keyed by their `tunnel_id`.
     pub members: DashMap<Uuid, GroupMember>,
+    /// Debounce flag for the "0 healthy members" webhook alert
+    /// (TUNNEL-8 Phase 5). Set to `true` after we fire an alert; reset
+    /// to `false` when any member becomes healthy again. Prevents the
+    /// alert from re-firing on every additional `TunnelUnhealthy` while
+    /// the group is already known-down.
+    pub zero_healthy_alerted: AtomicBool,
 }
 
 impl TunnelGroup {
@@ -153,6 +223,7 @@ impl TunnelGroup {
             name,
             key_hash: None,
             members: DashMap::new(),
+            zero_healthy_alerted: AtomicBool::new(false),
         });
         group
             .members
@@ -175,10 +246,72 @@ impl TunnelGroup {
             name,
             key_hash,
             members: DashMap::new(),
+            zero_healthy_alerted: AtomicBool::new(false),
         });
         group.members.insert(tunnel_id, member);
         group
     }
+
+    /// Count the members currently marked healthy. Lock-free; fine to
+    /// call on the hot path.
+    pub fn healthy_count(&self) -> usize {
+        self.members
+            .iter()
+            .filter(|m| m.healthy.load(std::sync::atomic::Ordering::Acquire))
+            .count()
+    }
+}
+
+/// Payload for the "group went 0/N healthy" webhook alert
+/// (TUNNEL-8 Phase 5). Serialised as JSON in the POST body sent to each
+/// configured webhook destination.
+#[derive(Debug, Clone)]
+pub struct GroupAlertPayload {
+    pub region_id: String,
+    pub protocol: String,
+    pub label: String,
+    pub group_name: String,
+    pub key_hash_short: String,
+    pub member_count: usize,
+}
+
+/// Output of `TunnelCore::pop_zero_healthy_alert` — the alert payload
+/// plus the deduped list of per-tenant webhook destinations gathered
+/// from the affected group's members. The frame handler also adds the
+/// operator-side `[load_balancing] alert_webhook_url` when firing, so
+/// this struct doesn't include it.
+#[derive(Debug, Clone)]
+pub struct ZeroHealthyAlert {
+    pub payload: GroupAlertPayload,
+    /// Unique per-tenant webhook URLs from `member.health_spec.alert_webhook_url`,
+    /// in insertion order. Typically one URL (one tenant per group); rare
+    /// multi-tenant pools (plan §4.6) yield several. Each URL gets one
+    /// POST per transition.
+    pub tenant_webhook_urls: Vec<String>,
+}
+
+/// One push event on the live group-event stream
+/// (`GET /api/groups/:label/events`). Emitted whenever a member's health
+/// bit flips. Subscribers filter on `(protocol, label)` server-side, so a
+/// dashboard tab open on `pool` doesn't see events for other groups.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GroupEvent {
+    /// `http` / `tcp` / `udp` — matches the routing-table the group lives in.
+    pub protocol: String,
+    /// Subdomain (HTTP) or port-as-string (TCP/UDP) — the routing key.
+    pub label: String,
+    /// `tunnel_id` of the affected member.
+    pub tunnel_id: Uuid,
+    /// New health state of the member after the transition.
+    pub healthy: bool,
+    /// Free-form reason carried by `TunnelUnhealthy`, or `"recovered"` for
+    /// the upward edge. Same string that lands in the per-member ring buffer.
+    pub reason: String,
+    /// Healthy member count *after* the transition, so dashboards can
+    /// render `2/3 healthy` without a follow-up GET.
+    pub healthy_count: usize,
+    /// Total member count after the transition.
+    pub member_count: usize,
 }
 
 /// User-supplied parameters for joining or creating a load-balancing group.

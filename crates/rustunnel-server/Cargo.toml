@@ -51,3 +51,4 @@ socket2 = { workspace = true }
 sentry = { workspace = true }
 sentry-tracing = { workspace = true }
 rand = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }

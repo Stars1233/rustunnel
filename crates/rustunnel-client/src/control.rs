@@ -941,6 +941,10 @@ fn health_check_to_wire(
         max_failed: cfg.max_failed.max(1),
         http_path: cfg.path.clone(),
         http_expect_2xx: cfg.expect_2xx,
+        // Per-tenant webhook URL (separate from the operator-side
+        // `[load_balancing] alert_webhook_url` on the edge). Server
+        // fires this when *this tunnel's* group goes 0/N healthy.
+        alert_webhook_url: cfg.alert_webhook.clone(),
     })
 }
 
