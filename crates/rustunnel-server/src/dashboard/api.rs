@@ -101,12 +101,55 @@ pub fn router(state: ApiState) -> Router {
 
 // ── auth helper ───────────────────────────────────────────────────────────────
 
+/// Tenant scope resolved from the `Authorization` header. Determines which
+/// tunnels/groups a dashboard caller is allowed to see (TUNNEL-1).
+///
+/// - `Admin` — operator-level access (the `auth.admin_token`). Sees every
+///   tunnel and group across every tenant. This is the historical
+///   behaviour and must stay unchanged.
+/// - `User(user_id)` — a DB token whose `tokens.user_id` is set. The
+///   caller can only see tunnels owned by sessions whose token belongs to
+///   that same `user_id` (so a user can list all of *their* tunnels even
+///   across multiple tokens / multiple clients).
+/// - `Token(token_id)` — a legacy / admin-issued DB token with no
+///   `user_id` (e.g. the bootstrap "agent" tokens that predate the
+///   platform-api). Visibility is narrowed to that specific token: you
+///   only see tunnels opened by sessions authenticated with the same DB
+///   token row. Picked over admin-equivalent so adding the user dashboard
+///   surface can't widen visibility for these legacy tokens by accident.
+#[derive(Clone, Debug)]
+enum AuthScope {
+    Admin,
+    User(uuid::Uuid),
+    Token(String),
+}
+
+impl AuthScope {
+    /// Whether this caller can see a tunnel/group member owned by the
+    /// session described by `(session_user_id, session_db_token_id)`.
+    /// Sessions with neither value (auth disabled, admin-token control
+    /// plane, …) are visible only to `Admin` callers.
+    fn can_see(
+        &self,
+        session_user_id: Option<uuid::Uuid>,
+        session_db_token_id: Option<&str>,
+    ) -> bool {
+        match self {
+            AuthScope::Admin => true,
+            AuthScope::User(uid) => session_user_id == Some(*uid),
+            AuthScope::Token(tid) => session_db_token_id == Some(tid.as_str()),
+        }
+    }
+}
+
 /// Validate `Authorization: Bearer <token>` against the DB token table.
-/// Also accepts the admin token directly.
+/// Also accepts the admin token directly. Returns the resolved
+/// [`AuthScope`] so handlers can scope their results to the caller's
+/// tenant.
 async fn require_auth(
     headers: &HeaderMap,
     state: &ApiState,
-) -> Result<(), (StatusCode, Json<ErrBody>)> {
+) -> Result<AuthScope, (StatusCode, Json<ErrBody>)> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -119,17 +162,74 @@ async fn require_auth(
 
     // Check admin token first (avoids DB hit for the most common case).
     if auth == state.admin_token {
-        return Ok(());
+        return Ok(AuthScope::Admin);
     }
 
     match db::verify_token(&state.db.pg, auth).await {
-        Ok(Some(_)) => Ok(()),
+        Ok(Some(t)) => match t.user_id {
+            Some(uid) => Ok(AuthScope::User(uid)),
+            None => Ok(AuthScope::Token(t.id)),
+        },
         Ok(None) => Err(unauthorized("invalid token")),
         Err(e) => {
             warn!("token verification DB error: {e}");
             Err(unauthorized("invalid token"))
         }
     }
+}
+
+/// Look up the owning session of a `TunnelInfo` (or P2P publisher) and
+/// answer whether `scope` is allowed to see the member.
+///
+/// Sessions can disappear under us (the session map is mutated lock-free
+/// from other tasks) — when that happens we deny access except for the
+/// admin scope. That matches the issue's "404 for tunnels the caller
+/// can't see" rule and avoids leaking a stale tunnel after its session
+/// closed.
+fn scope_sees_session(
+    core: &crate::core::TunnelCore,
+    scope: &AuthScope,
+    session_id: &uuid::Uuid,
+) -> bool {
+    if matches!(scope, AuthScope::Admin) {
+        return true;
+    }
+    match core.sessions.get(session_id) {
+        Some(s) => scope.can_see(s.user_id, s.db_token_id.as_deref()),
+        None => false,
+    }
+}
+
+/// Walk the routing tables to find which session owns `tunnel_id`.
+/// Returns `None` if the tunnel doesn't exist. Used by handlers that
+/// resolve a tunnel by ID and need to enforce scope before returning
+/// data or mutating state.
+fn find_tunnel_owning_session(
+    core: &crate::core::TunnelCore,
+    tunnel_id: &uuid::Uuid,
+) -> Option<uuid::Uuid> {
+    for entry in core.http_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.info.session_id);
+        }
+    }
+    for entry in core.tcp_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.info.session_id);
+        }
+    }
+    for entry in core.udp_routes.iter() {
+        if let Some(member) = entry.value().members.get(tunnel_id) {
+            return Some(member.info.session_id);
+        }
+    }
+    for entry in core.p2p_tunnels.iter() {
+        let publisher = entry.value();
+        if publisher.tunnel_info.tunnel_id == *tunnel_id {
+            return Some(publisher.tunnel_info.session_id);
+        }
+    }
+    None
 }
 
 // ── response helpers ──────────────────────────────────────────────────────────
@@ -295,15 +395,20 @@ fn instant_to_iso(created: std::time::Instant) -> String {
 }
 
 async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     let mut tunnels: Vec<TunnelSummary> = Vec::new();
 
-    // One row per member. Solo tunnels (Phase 1 case) render exactly as
-    // before — `group` is `None`, `healthy` is `true`, the failure counters
-    // are 0. Group members get the full `GroupRef`, the actual health bit,
+    // One row per member, filtered to the caller's tenant scope. Admin
+    // sees everything; user-scoped tokens see only members owned by
+    // sessions belonging to that user; legacy / no-user-id tokens see
+    // only members opened by sessions authenticated with that exact
+    // token. Solo tunnels (Phase 1 case) render exactly as before —
+    // `group` is `None`, `healthy` is `true`, the failure counters are
+    // 0. Group members get the full `GroupRef`, the actual health bit,
     // and per-member failure counters so the dashboard can show "this
     // backend is currently down on its 3rd straight probe failure".
     for entry in state.core.http_routes.iter() {
@@ -311,6 +416,9 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
         let group_arc = entry.value();
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
+            if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                continue;
+            }
             tunnels.push(member_to_summary(
                 &member,
                 "http",
@@ -327,6 +435,9 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
         let group_arc = entry.value();
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
+            if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                continue;
+            }
             tunnels.push(member_to_summary(
                 &member,
                 "tcp",
@@ -343,6 +454,9 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
         let group_arc = entry.value();
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
+            if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                continue;
+            }
             tunnels.push(member_to_summary(
                 &member,
                 "udp",
@@ -357,6 +471,9 @@ async fn list_tunnels(headers: HeaderMap, State(state): State<ApiState>) -> impl
     for entry in state.core.p2p_tunnels.iter() {
         let publisher = entry.value();
         let info = &publisher.tunnel_info;
+        if !scope_sees_session(&state.core, &scope, &info.session_id) {
+            continue;
+        }
         let client_addr = state
             .core
             .sessions
@@ -451,14 +568,37 @@ async fn force_close_tunnel(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     let tunnel_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => u,
         Err(_) => return not_found("invalid tunnel id").into_response(),
     };
+
+    // Admin short-circuit: preserves the historical idempotent
+    // semantics (204 even when the tunnel doesn't exist) and avoids
+    // walking every route to find an owner that doesn't matter.
+    if matches!(scope, AuthScope::Admin) {
+        state.core.remove_tunnel(&tunnel_id);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    // Non-admin: resolve the tunnel's owning session before mutating
+    // state so a user-scoped caller can't close another tenant's
+    // tunnel. Return 404 (not 403) when the caller can't see the
+    // tunnel — same shape as "tunnel doesn't exist" so we don't leak
+    // existence.
+    let owning_session = find_tunnel_owning_session(&state.core, &tunnel_id);
+    let visible = match owning_session {
+        Some(sid) => scope_sees_session(&state.core, &scope, &sid),
+        None => false,
+    };
+    if !visible {
+        return not_found("tunnel not found").into_response();
+    }
 
     state.core.remove_tunnel(&tunnel_id);
     StatusCode::NO_CONTENT.into_response()
@@ -469,9 +609,10 @@ async fn get_tunnel(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     // Search HTTP routes first.
     for entry in state.core.http_routes.iter() {
@@ -480,6 +621,9 @@ async fn get_tunnel(
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
             if member.info.tunnel_id.to_string() == id {
+                if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                    return not_found("tunnel not found").into_response();
+                }
                 return Json(member_to_summary(
                     &member,
                     "http",
@@ -500,6 +644,9 @@ async fn get_tunnel(
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
             if member.info.tunnel_id.to_string() == id {
+                if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                    return not_found("tunnel not found").into_response();
+                }
                 return Json(member_to_summary(
                     &member,
                     "tcp",
@@ -520,6 +667,9 @@ async fn get_tunnel(
         let group_ref = group_summary_ref(group_arc);
         for member in group_arc.members.iter() {
             if member.info.tunnel_id.to_string() == id {
+                if !scope_sees_session(&state.core, &scope, &member.info.session_id) {
+                    return not_found("tunnel not found").into_response();
+                }
                 return Json(member_to_summary(
                     &member,
                     "udp",
@@ -538,6 +688,9 @@ async fn get_tunnel(
         let publisher = entry.value();
         if publisher.tunnel_info.tunnel_id.to_string() == id {
             let info = &publisher.tunnel_info;
+            if !scope_sees_session(&state.core, &scope, &info.session_id) {
+                return not_found("tunnel not found").into_response();
+            }
             let client_addr = state
                 .core
                 .sessions
@@ -592,14 +745,25 @@ async fn tunnel_health_events(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     let tunnel_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => u,
         Err(_) => return not_found("invalid tunnel id").into_response(),
     };
+
+    // 404 (not 403) when the caller can't see this tunnel — same shape
+    // as "tunnel doesn't exist" so existence isn't leaked.
+    let owning_session = find_tunnel_owning_session(&state.core, &tunnel_id);
+    if !owning_session
+        .map(|sid| scope_sees_session(&state.core, &scope, &sid))
+        .unwrap_or(false)
+    {
+        return not_found("tunnel not found").into_response();
+    }
 
     // Walk the routing tables to find this tunnel's GroupMember and
     // snapshot its ring. Same shape as `get_tunnel`.
@@ -703,25 +867,39 @@ struct GroupSummary {
 }
 
 async fn list_groups(headers: HeaderMap, State(state): State<ApiState>) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     let mut groups: Vec<GroupSummary> = Vec::new();
     let region = state.region.id.clone();
 
+    // Per-group filtering rules:
+    // - Admin sees every group with full aggregates.
+    // - Other scopes only see groups where at least one member's owning
+    //   session is visible to them, and every counter
+    //   (`member_count`, `healthy_count`, `unhealthy_count`,
+    //   `total_dispatches`, `total_health_failures`) reflects only the
+    //   visible subset. Today's group-key model is single-tenant in
+    //   practice, but filtering aggregates as well keeps the response
+    //   safe under any future multi-tenant pool — no cross-tenant
+    //   counts ever leak through.
     for entry in state.core.http_routes.iter() {
         let group = entry.value();
         if group.key_hash.is_none() {
             continue; // solo registration — covered by /api/tunnels
         }
-        groups.push(group_to_summary(
+        if let Some(summary) = group_to_summary(
             "http",
             entry.key().clone(),
             group,
             &state.core,
             &region,
-        ));
+            &scope,
+        ) {
+            groups.push(summary);
+        }
     }
 
     for entry in state.core.tcp_routes.iter() {
@@ -729,34 +907,44 @@ async fn list_groups(headers: HeaderMap, State(state): State<ApiState>) -> impl 
         if group.key_hash.is_none() {
             continue;
         }
-        groups.push(group_to_summary(
+        if let Some(summary) = group_to_summary(
             "tcp",
             entry.key().to_string(),
             group,
             &state.core,
             &region,
-        ));
+            &scope,
+        ) {
+            groups.push(summary);
+        }
     }
 
     Json(groups).into_response()
 }
 
-/// Build a `GroupSummary` for a single routing entry.
+/// Build a `GroupSummary` for a single routing entry, filtered to the
+/// caller's `scope`. Returns `None` when the caller can't see any
+/// member of this group — the row is dropped from the response.
 fn group_to_summary(
     protocol: &str,
     label: String,
     group: &Arc<crate::core::TunnelGroup>,
     core: &Arc<crate::core::TunnelCore>,
     region_id: &str,
-) -> GroupSummary {
+    scope: &AuthScope,
+) -> Option<GroupSummary> {
     let key_hash = group.key_hash.as_deref().unwrap_or("");
     let mut healthy_count = 0;
     let mut unhealthy_count = 0;
     let mut total_dispatches: u64 = 0;
     let mut total_health_failures: u64 = 0;
+    let mut visible_member_count = 0usize;
     let mut members = Vec::with_capacity(group.members.len());
     for m in group.members.iter() {
         let info = &m.info;
+        if !scope_sees_session(core, scope, &info.session_id) {
+            continue;
+        }
         let healthy = m.healthy.load(Ordering::Acquire);
         if healthy {
             healthy_count += 1;
@@ -767,6 +955,7 @@ fn group_to_summary(
         let failures = m.total_health_failures.load(Ordering::Relaxed);
         total_dispatches += req_count;
         total_health_failures += failures;
+        visible_member_count += 1;
         let client_addr = core
             .sessions
             .get(&info.session_id)
@@ -795,19 +984,26 @@ fn group_to_summary(
             has_alert_webhook,
         });
     }
-    GroupSummary {
+    if members.is_empty() {
+        return None;
+    }
+    // Aggregates reflect only visible members. For admin callers this
+    // matches the historical full-pool numbers because every member is
+    // visible. For tenant callers it never includes members from
+    // sessions they aren't allowed to see.
+    Some(GroupSummary {
         protocol: protocol.to_string(),
         label,
         name: group.name.clone(),
         key_hash_short: key_hash.chars().take(8).collect(),
         region_id: region_id.to_string(),
-        member_count: group.members.len(),
+        member_count: visible_member_count,
         healthy_count,
         unhealthy_count,
         total_dispatches,
         total_health_failures,
         members,
-    }
+    })
 }
 
 // ── /api/groups/:protocol/:label/events — SSE (TUNNEL-8 Phase 5) ────────────
@@ -830,21 +1026,73 @@ async fn group_events_sse(
     State(state): State<ApiState>,
     Path((protocol, label)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+
+    // Resolve the group up-front and verify the caller can see it. We
+    // look it up by `(protocol, label)` in the routing tables and check
+    // that at least one member is visible to the caller. 404 otherwise
+    // — same shape as a non-existent group, no existence leak. After
+    // the initial check the per-event filter only emits events for
+    // members the caller is allowed to see, so member churn (a new
+    // foreign-tenant member joins a previously visible group) can't
+    // exfil events from outside the caller's scope.
+    let group_visible = match protocol.as_str() {
+        "http" => state
+            .core
+            .http_routes
+            .get(&label)
+            .map(|g| {
+                g.members
+                    .iter()
+                    .any(|m| scope_sees_session(&state.core, &scope, &m.info.session_id))
+            })
+            .unwrap_or(false),
+        "tcp" => label
+            .parse::<u16>()
+            .ok()
+            .and_then(|p| state.core.tcp_routes.get(&p))
+            .map(|g| {
+                g.members
+                    .iter()
+                    .any(|m| scope_sees_session(&state.core, &scope, &m.info.session_id))
+            })
+            .unwrap_or(false),
+        _ => false,
+    };
+    if !matches!(scope, AuthScope::Admin) && !group_visible {
+        return not_found("group not found").into_response();
     }
 
     let receiver = state.core.subscribe_group_events();
     let stream = tokio_stream::wrappers::BroadcastStream::new(receiver);
     let proto = protocol;
     let lbl = label;
+    let core = Arc::clone(&state.core);
+    let stream_scope = scope.clone();
     let filtered = futures_util::StreamExt::filter_map(stream, move |result| {
         let proto = proto.clone();
         let lbl = lbl.clone();
+        let core = Arc::clone(&core);
+        let stream_scope = stream_scope.clone();
         async move {
             match result {
                 Ok(event) => {
                     if event.protocol == proto && event.label == lbl {
+                        // Drop events for members the caller can't see
+                        // — protects against a foreign tenant joining
+                        // the same group later in the stream.
+                        if !matches!(stream_scope, AuthScope::Admin) {
+                            let owning = find_tunnel_owning_session(&core, &event.tunnel_id);
+                            let visible = owning
+                                .map(|sid| scope_sees_session(&core, &stream_scope, &sid))
+                                .unwrap_or(false);
+                            if !visible {
+                                return None;
+                            }
+                        }
                         let payload = serde_json::to_string(&event).ok()?;
                         Some(Ok::<_, std::convert::Infallible>(
                             axum::response::sse::Event::default()
@@ -891,8 +1139,26 @@ async fn tunnel_requests(
     Path(tunnel_id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<RequestsQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+
+    // Captured requests are tied to a tunnel — same scope check as the
+    // `/api/tunnels/:id` endpoint. 404 (not 403) when the caller can't
+    // see the tunnel so we don't leak existence. We require the tunnel
+    // to be live in-memory (the dashboard typically captures only for
+    // live tunnels); a tunnel that has gone away can't be looked up by
+    // owner so we deny non-admin callers in that case.
+    let parsed = tunnel_id.parse::<uuid::Uuid>().ok();
+    let visible = match parsed {
+        Some(tid) => find_tunnel_owning_session(&state.core, &tid)
+            .map(|sid| scope_sees_session(&state.core, &scope, &sid))
+            .unwrap_or(matches!(scope, AuthScope::Admin)),
+        None => matches!(scope, AuthScope::Admin),
+    };
+    if !visible {
+        return not_found("tunnel not found").into_response();
     }
 
     // Try in-memory ring buffer first for low-latency reads.
@@ -925,8 +1191,23 @@ async fn replay_request(
     State(state): State<ApiState>,
     Path((tunnel_id, request_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+
+    // Same scope check as `/api/tunnels/:id/requests`: 404 if the caller
+    // can't see the parent tunnel. Stops a non-admin tenant from
+    // replaying captured requests they didn't generate.
+    let parsed = tunnel_id.parse::<uuid::Uuid>().ok();
+    let visible = match parsed {
+        Some(tid) => find_tunnel_owning_session(&state.core, &tid)
+            .map(|sid| scope_sees_session(&state.core, &scope, &sid))
+            .unwrap_or(matches!(scope, AuthScope::Admin)),
+        None => matches!(scope, AuthScope::Admin),
+    };
+    if !visible {
+        return not_found("tunnel not found").into_response();
     }
 
     match crate::dashboard::capture::get_request(&state.db.local, &request_id).await {
@@ -1645,9 +1926,10 @@ async fn tunnel_udp_sessions(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     // Find the UDP tunnel by ID.
     for entry in state.core.udp_routes.iter() {
@@ -1655,6 +1937,9 @@ async fn tunnel_udp_sessions(
         for member in entry.value().members.iter() {
             let info = &member.info;
             if info.tunnel_id.to_string() == id {
+                if !scope_sees_session(&state.core, &scope, &info.session_id) {
+                    return not_found("UDP tunnel not found").into_response();
+                }
                 return Json(UdpSessionInfo {
                     tunnel_id: info.tunnel_id.to_string(),
                     port,
@@ -1690,15 +1975,19 @@ async fn tunnel_p2p_peers(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_auth(&headers, &state).await {
-        return e.into_response();
-    }
+    let scope = match require_auth(&headers, &state).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     // Find the P2P tunnel by ID.
     for entry in state.core.p2p_tunnels.iter() {
         let publisher = entry.value();
         let info = &publisher.tunnel_info;
         if info.tunnel_id.to_string() == id {
+            if !scope_sees_session(&state.core, &scope, &info.session_id) {
+                return not_found("P2P tunnel not found").into_response();
+            }
             return Json(P2pPeerInfo {
                 tunnel_id: info.tunnel_id.to_string(),
                 tunnel_name: publisher.name.clone(),

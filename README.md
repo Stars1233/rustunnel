@@ -930,6 +930,8 @@ make docker-run-monitoring
 
 The dashboard port exposes a REST API for programmatic access to tunnels, tokens, captured requests, and tunnel history. All endpoints (except the health check) require an `Authorization: Bearer <token>` header.
 
+`/api/tunnels`, `/api/groups`, and their per-tunnel sub-resources are scoped by caller: the admin token sees everything; a user-scoped API token sees only its own tunnels and groups; tunnels the caller can't see return `404`, never `403`. See [docs/api-reference.md § Visibility scope](docs/api-reference.md#visibility-scope) for the full rules.
+
 **Quick reference**
 
 | Method | Path | Description |

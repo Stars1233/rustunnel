@@ -247,12 +247,13 @@ impl TunnelCore {
         addr: SocketAddr,
         token_id: String,
         db_token_id: Option<String>,
+        user_id: Option<Uuid>,
         control_tx: mpsc::Sender<ControlMessage>,
     ) -> Uuid {
         let session_id = Uuid::new_v4();
         self.sessions.insert(
             session_id,
-            SessionInfo::new(addr, token_id, db_token_id, control_tx),
+            SessionInfo::new(addr, token_id, db_token_id, user_id, control_tx),
         );
         session_id
     }
@@ -1094,7 +1095,7 @@ mod tests {
     fn dummy_session(core: &TunnelCore) -> (Uuid, mpsc::Receiver<ControlMessage>) {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let (tx, rx) = mpsc::channel(16);
-        let session_id = core.register_session(addr, "token-1".to_string(), None, tx);
+        let session_id = core.register_session(addr, "token-1".to_string(), None, None, tx);
         (session_id, rx)
     }
 

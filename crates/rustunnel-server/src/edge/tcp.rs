@@ -261,7 +261,7 @@ mod tests {
     fn add_session(core: &Arc<TunnelCore>) -> (Uuid, mpsc::Receiver<ControlMessage>) {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
         let (tx, rx) = mpsc::channel(16);
-        let sid = core.register_session(addr, "tok".into(), None, tx);
+        let sid = core.register_session(addr, "tok".into(), None, None, tx);
         (sid, rx)
     }
 
