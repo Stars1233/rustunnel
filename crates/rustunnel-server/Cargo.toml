@@ -2,6 +2,13 @@
 name = "rustunnel-server"
 version = "0.7.8"
 edition = "2021"
+description = "Self-hosted, secure tunnel server in Rust. Exposes local HTTP/HTTPS/TCP/UDP services via TLS-encrypted WebSocket. Open-source ngrok alternative with multi-region and Prometheus metrics."
+keywords = ["tunnel", "ngrok", "self-hosted", "reverse-proxy", "webhook"]
+categories = ["network-programming", "web-programming::http-server", "command-line-utilities"]
+license = "AGPL-3.0"
+repository = "https://github.com/joaoh82/rustunnel"
+homepage = "https://rustunnel.com"
+readme = "../../README.md"
 
 [lib]
 name = "rustunnel_server"
