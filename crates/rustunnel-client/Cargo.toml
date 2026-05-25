@@ -2,6 +2,13 @@
 name = "rustunnel-client"
 version = "0.7.8"
 edition = "2021"
+description = "CLI client for rustunnel — open-source secure tunnel server. Expose local HTTP/HTTPS/TCP/UDP services from your machine to a public URL."
+keywords = ["tunnel", "ngrok", "cli", "webhook", "reverse-proxy"]
+categories = ["command-line-utilities", "network-programming", "development-tools"]
+license = "AGPL-3.0"
+repository = "https://github.com/joaoh82/rustunnel"
+homepage = "https://rustunnel.com"
+readme = "../../README.md"
 
 [[bin]]
 name = "rustunnel"
