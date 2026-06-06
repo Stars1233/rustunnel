@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "rustunnel": {
+      "command": "rustunnel-mcp",
+      "args": [
+        "--server", "eu.edge.rustunnel.com:4040",
+        "--api", "https://eu.edge.rustunnel.com:8443"
+      ],
+      "env": {
+        "RUSTUNNEL_TOKEN": "REPLACE_WITH_YOUR_TOKEN"
+      }
+    }
+  }
+}

@@ -961,6 +961,14 @@ rustunnel ships a `rustunnel-mcp` binary that implements the
 letting AI agents (Claude, GPT-4o, custom agents) open and manage tunnels
 without any manual intervention.
 
+**Works with any MCP harness.** For copy-paste config for Claude Code, Claude
+Desktop, Codex, Cursor, Windsurf, Cline, and custom agents — plus a one-command
+installer — see the **[Agent Integration Guide](docs/agent-integration.md)**:
+
+```bash
+./integrations/install.sh        # prompts for your token, writes the config
+```
+
 ### Quick setup (Claude Desktop — hosted server)
 
 ```json
@@ -971,17 +979,20 @@ without any manual intervention.
       "args": [
         "--server", "edge.rustunnel.com:4040",
         "--api",    "https://edge.rustunnel.com:8443"
-      ]
+      ],
+      "env": { "RUSTUNNEL_TOKEN": "<your-token>" }
     }
   }
 }
 ```
 
+Set `RUSTUNNEL_TOKEN` once and the agent never has to pass a token on a tool call.
+
 ### Available tools
 
 | Tool | Description |
 |------|-------------|
-| `create_tunnel` | Spawn a tunnel and return the public URL |
+| `create_tunnel` | Open a tunnel and return the public URL — HTTP/TCP/UDP, P2P, and load-balanced pools with health checks |
 | `list_tunnels` | List all active tunnels |
 | `close_tunnel` | Force-close a tunnel by ID |
 | `list_regions` | List available server regions |

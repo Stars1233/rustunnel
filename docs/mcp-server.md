@@ -5,6 +5,12 @@ The `rustunnel-mcp` binary implements the
 stdio, letting AI agents (Claude, GPT-4o, Gemini, custom agents) manage
 tunnels without any manual setup.
 
+> **Just want to wire rustunnel into your harness?** See
+> [agent-integration.md](./agent-integration.md) for copy-paste config for
+> Claude Code, Claude Desktop, Codex, Cursor, Windsurf, Cline, and generic MCP
+> clients, plus a one-command installer (`integrations/install.sh`). This page
+> is the deeper reference for the server and its tools.
+
 ---
 
 ## How it works
@@ -201,15 +207,23 @@ def call(method, params=None, id=1):
 
 ### `create_tunnel`
 
-Open a tunnel to a locally running service and get a public URL.
+Open a tunnel to a locally running service and get a public URL. Handles plain
+HTTP/TCP/UDP tunnels, peer-to-peer tunnels, and load-balanced pools.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | yes | API token for authentication |
+| `token` | string | no¹ | API token. ¹Optional when `RUSTUNNEL_TOKEN` is set in the MCP config. |
 | `local_port` | integer | yes | Local port the service is listening on |
-| `protocol` | `"http"` \| `"tcp"` | yes | Tunnel type |
+| `protocol` | `"http"` \| `"tcp"` \| `"udp"` \| `"p2p"` | yes | Tunnel type |
 | `subdomain` | string | no | Custom subdomain for HTTP tunnels |
 | `region` | string | no | Region ID (e.g. `"eu"`, `"us"`, `"ap"`). Omit to auto-select by latency. Use `list_regions` to see options. |
+| `local_host` | string | no | Local hostname to forward to (default `localhost`) |
+| `secret` | string | p2p | Shared P2P secret — publisher and subscriber must match |
+| `peer_name` | string | p2p publish | Publish the local service under this name |
+| `peer_target` | string | p2p connect | Connect to a published P2P tunnel by this name |
+| `group` | string | LB | Load-balancing pool name (http/tcp only) |
+| `group_key` | string | LB | Shared secret for the pool; members must agree |
+| `health_check` | object | no | `{ type: "tcp"\|"http", path, interval_secs, timeout_secs, max_failed, expect_2xx, alert_webhook }` |
 
 **Returns:**
 ```json
@@ -221,11 +235,17 @@ Open a tunnel to a locally running service and get a public URL.
 ```
 
 The MCP server spawns `rustunnel` as a background subprocess and polls the API
-until the tunnel appears (up to 15 seconds). The tunnel stays open until
-`close_tunnel` is called or the MCP server exits.
+until the tunnel appears (up to 15 seconds). Load-balanced tunnels are launched
+via a temporary `rustunnel start` config that is cleaned up automatically. The
+tunnel stays open until `close_tunnel` is called or the MCP server exits.
 
-**Example agent prompt:**
-> "Expose my local server on port 3000 using token abc123."
+**Example agent prompts:**
+> "Expose my local server on port 3000."
+> "Open a P2P tunnel to port 3000 named `my-svc` with secret `hunter2`."
+> "Load-balance ports 3000 and 3001 under subdomain `pool` with an HTTP health check on `/health`."
+
+> **Tip:** set `RUSTUNNEL_TOKEN` once in the MCP config (see the examples above)
+> so you never have to pass `token` on a tool call.
 
 ---
 
@@ -235,7 +255,7 @@ List all currently active tunnels.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | yes | API token for authentication |
+| `token` | string | no | API token (optional if `RUSTUNNEL_TOKEN` is set) |
 
 **Returns:** JSON array of tunnel objects from `GET /api/tunnels`.
 
@@ -247,23 +267,26 @@ Force-close a tunnel. The public URL stops working immediately.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | yes | API token |
+| `token` | string | no | API token (optional if `RUSTUNNEL_TOKEN` is set) |
 | `tunnel_id` | string | yes | UUID returned by `create_tunnel` or `list_tunnels` |
 
 ---
 
 ### `get_connection_info`
 
-Returns the CLI command string without spawning anything. Use this when the
-MCP server cannot launch subprocesses (cloud sandboxes, containers) or when
-you want to run the CLI yourself.
+Returns the CLI command (and, for load-balanced tunnels, a config file) without
+spawning anything. Use this when the MCP server cannot launch subprocesses
+(cloud sandboxes, containers) or when you want to run the CLI yourself. Accepts
+the **same arguments as `create_tunnel`** (`local_host`, `secret`/`peer_name`/
+`peer_target` for P2P, `group`/`group_key`/`health_check` for load balancing).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | yes | API token |
+| `token` | string | no¹ | API token (¹optional if `RUSTUNNEL_TOKEN` is set) |
 | `local_port` | integer | yes | Local port to expose |
-| `protocol` | `"http"` \| `"tcp"` | yes | Tunnel type |
+| `protocol` | `"http"` \| `"tcp"` \| `"udp"` \| `"p2p"` | yes | Tunnel type |
 | `region` | string | no | Region ID (e.g. `"eu"`, `"us"`). Omit to auto-select. |
+| … | | | plus the optional `create_tunnel` args above |
 
 **Returns:**
 ```json
@@ -301,8 +324,8 @@ Retrieve the history of past tunnels.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | yes | API token |
-| `protocol` | `"http"` \| `"tcp"` | no | Filter by protocol |
+| `token` | string | no | API token (optional if `RUSTUNNEL_TOKEN` is set) |
+| `protocol` | `"http"` \| `"tcp"` \| `"udp"` \| `"p2p"` | no | Filter by protocol |
 | `limit` | integer | no | Max entries to return (default: 25) |
 
 ---
