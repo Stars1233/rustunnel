@@ -56,9 +56,18 @@ Once installed, just ask Claude:
 
 > "Open an HTTP tunnel to port 8080 with subdomain myapp."
 
+> "Tunnel my Postgres on port 5432 over TCP."
+
+> "Open a P2P tunnel to port 3000 named `my-svc` with secret `hunter2`."
+
+> "Load-balance ports 3000 and 3001 under subdomain `pool` with a `/health` check."
+
 > "List my active tunnels."
 
 > "Close tunnel a1b2c3d4-..."
+
+Your token is read from the `RUSTUNNEL_TOKEN` env var configured at install
+time, so you never have to repeat it.
 
 ## Available Tools
 
@@ -71,8 +80,16 @@ Once installed, just ask Claude:
 | `get_tunnel_history` | View past tunnel activity |
 | `get_connection_info` | Get the CLI command (for cloud sandboxes) |
 
+## Other harnesses
+
+Not using Claude Code? The same MCP server works with Claude Desktop, Codex,
+Cursor, Windsurf, Cline, and custom agents — see the
+[Agent Integration Guide](https://github.com/joaoh82/rustunnel/blob/main/docs/agent-integration.md)
+or run `integrations/install.sh`.
+
 ## Links
 
 - [GitHub](https://github.com/joaoh82/rustunnel)
 - [Documentation](https://docs.rustunnel.com)
+- [Agent Integration Guide](https://github.com/joaoh82/rustunnel/blob/main/docs/agent-integration.md)
 - [MCP Server Guide](https://docs.rustunnel.com/guides/mcp-server)

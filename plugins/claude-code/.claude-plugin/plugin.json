@@ -1,7 +1,7 @@
 {
   "name": "rustunnel",
-  "version": "1.0.0",
-  "description": "Expose local services via secure tunnels. Create public HTTPS/TCP URLs for webhooks, demos, and AI agent workflows.",
+  "version": "1.1.0",
+  "description": "Expose local services via secure tunnels. Create public HTTPS/TCP/UDP URLs, peer-to-peer tunnels, and load-balanced pools for webhooks, demos, and AI agent workflows.",
   "author": {
     "name": "rustunnel",
     "url": "https://rustunnel.com"

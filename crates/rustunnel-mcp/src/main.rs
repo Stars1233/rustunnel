@@ -19,11 +19,16 @@
 //!     "rustunnel": {
 //!       "command": "rustunnel-mcp",
 //!       "args": ["--server", "tunnel.example.com:4040",
-//!                "--api",    "https://tunnel.example.com:8443"]
+//!                "--api",    "https://tunnel.example.com:8443"],
+//!       "env": { "RUSTUNNEL_TOKEN": "<your-token>" }
 //!     }
 //!   }
 //! }
 //! ```
+//!
+//! The `RUSTUNNEL_TOKEN` environment variable, when set, is used as the
+//! default API token for every tool call — agents only need it configured
+//! once here rather than passing `token` on each request.
 
 mod api_client;
 mod mcp;
@@ -76,6 +81,10 @@ pub struct State {
     pub tunnel_manager: TunnelManager,
     /// Whether to pass --insecure to the CLI.
     pub insecure: bool,
+    /// Default API token, read from the `RUSTUNNEL_TOKEN` environment variable
+    /// at startup. Used as a fallback when a tool call omits the `token`
+    /// argument, so agents don't have to pass the token on every call.
+    pub token: Option<String>,
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -93,11 +102,19 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    // A token supplied via RUSTUNNEL_TOKEN becomes the default for every tool
+    // call, so the agent only needs the token configured once (in the MCP
+    // client config) rather than passing it on each request.
+    let env_token = std::env::var("RUSTUNNEL_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+
     let state = Arc::new(State {
         server_addr: cli.server,
         api: ApiClient::new(&cli.api, cli.insecure),
         tunnel_manager: TunnelManager::new(),
         insecure: cli.insecure,
+        token: env_token,
     });
 
     run(state).await;

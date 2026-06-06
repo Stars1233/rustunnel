@@ -1,0 +1,10 @@
+# Add this block to ~/.codex/config.toml so OpenAI Codex can drive rustunnel.
+#
+# Get a free API token at https://rustunnel.com (Dashboard -> API Keys) and
+# replace the placeholder below. For a self-hosted server, swap the --server and
+# --api values for your own host (add "--insecure" for local self-signed certs).
+
+[mcp_servers.rustunnel]
+command = "rustunnel-mcp"
+args = ["--server", "eu.edge.rustunnel.com:4040", "--api", "https://eu.edge.rustunnel.com:8443"]
+env = { RUSTUNNEL_TOKEN = "REPLACE_WITH_YOUR_TOKEN" }
