@@ -813,9 +813,10 @@ Events:
 | `error` | Fatal error; process exits with code 1 | `code` (`config`/`auth`/`tunnel`/`connection`/`protocol`/`io`), `message`, `hint` |
 | `token_created` | `token create --json` succeeded | `token`, `name`, `id` |
 
-Diagnostics still go to stderr, so stdout stays valid NDJSON. The auth
-token can also be supplied via the `RUSTUNNEL_TOKEN` environment variable
-instead of `--token`.
+Diagnostics still go to stderr, so stdout stays valid NDJSON. For the
+`http`, `tcp`, `udp`, and `p2p` commands the auth token can also be
+supplied via the `RUSTUNNEL_TOKEN` environment variable instead of
+`--token` (`start` reads tokens from the config file).
 
 ### Config file
 

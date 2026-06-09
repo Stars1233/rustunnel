@@ -45,6 +45,13 @@ impl Error {
                 "run `rustunnel setup` to create ~/.rustunnel/config.yml, \
                  or pass --server <host:port> and --token <token> directly",
             ),
+            // Auth failures from `token create` use the dashboard admin
+            // token (--admin-token), not the tunnel auth token — the message
+            // mentions "admin token", so key the hint off that.
+            Error::Auth(msg) if msg.contains("admin token") => Some(
+                "pass the server's admin token with --admin-token \
+                 (set as [auth] admin_token in the server config)",
+            ),
             Error::Auth(_) => Some(
                 "pass a valid token with --token or the RUSTUNNEL_TOKEN env var; \
                  get one at https://rustunnel.com (Dashboard -> API Keys), or for a \
@@ -64,3 +71,29 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_hint_points_at_admin_token_for_token_create_failures() {
+        // Message produced by `token create` on a 401/403 mentions "admin token".
+        let e = Error::Auth(
+            "token creation rejected by localhost:4040 (401): denied — \
+             pass a valid --admin-token (the server's admin token)"
+                .into(),
+        );
+        let hint = e.hint().unwrap();
+        assert!(hint.contains("--admin-token"));
+        assert!(!hint.contains("--token "));
+    }
+
+    #[test]
+    fn auth_hint_points_at_token_for_tunnel_auth_failures() {
+        let e = Error::Auth("server eu.edge.rustunnel.com:4040 rejected authentication".into());
+        let hint = e.hint().unwrap();
+        assert!(hint.contains("--token"));
+        assert!(hint.contains("RUSTUNNEL_TOKEN"));
+    }
+}

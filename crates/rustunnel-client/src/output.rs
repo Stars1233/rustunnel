@@ -126,7 +126,16 @@ pub fn emit(event: &Event) {
     // Event serialization is infallible: no maps with non-string keys, no
     // custom Serialize impls.
     let line = serde_json::to_string(event).expect("NDJSON event serialization cannot fail");
-    println!("{line}");
+    // Rust ignores SIGPIPE, so when the NDJSON consumer closes the pipe early
+    // (`rustunnel ... --json | head -1`) the write fails with BrokenPipe
+    // instead of killing the process. `println!` would panic on that; treat it
+    // as a normal end of output and exit cleanly.
+    use std::io::Write;
+    if let Err(e) = writeln!(std::io::stdout().lock(), "{line}") {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -242,8 +242,10 @@ async fn run_tunnel(proto: &str, args: TunnelArgs) -> error::Result<()> {
 
     let mut cfg = ClientConfig::load_default()?;
 
-    // Token and insecure apply unconditionally.
-    if let Some(t) = args.token {
+    // Token and insecure apply unconditionally. An empty/whitespace-only
+    // value (e.g. `RUSTUNNEL_TOKEN=""` filling the arg via clap's env
+    // support) counts as absent so it never clobbers a config-file token.
+    if let Some(t) = args.token.filter(|t| !t.trim().is_empty()) {
         cfg.auth_token = Some(t);
         cfg.auth_token_source = Some("--token flag / RUSTUNNEL_TOKEN env var".into());
     }
@@ -285,7 +287,9 @@ async fn run_p2p(args: P2pArgs) -> error::Result<()> {
 
     let mut cfg = ClientConfig::load_default()?;
 
-    if let Some(t) = args.token {
+    // Empty/whitespace-only token (e.g. `RUSTUNNEL_TOKEN=""`) counts as
+    // absent so it never clobbers a config-file token.
+    if let Some(t) = args.token.filter(|t| !t.trim().is_empty()) {
         cfg.auth_token = Some(t);
         cfg.auth_token_source = Some("--token flag / RUSTUNNEL_TOKEN env var".into());
     }

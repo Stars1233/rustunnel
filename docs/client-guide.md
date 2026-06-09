@@ -564,6 +564,7 @@ Each delay has ±20% random jitter to prevent thundering-herd reconnects when a 
 The following errors cause an immediate exit — retrying would not help:
 
 - **Auth failed** — invalid or revoked token. Fix: create a new token at [rustunnel.com](https://rustunnel.com) (Dashboard → API Keys) and update your config.
+- **Tunnel error** — the server rejected the registration (subdomain already taken, tunnel limit reached). Fix: pick a different `--subdomain` or close an existing tunnel.
 - **Config error** — missing required fields. Fix: check your `~/.rustunnel/config.yml`.
 
 ### Disabling reconnect
@@ -632,7 +633,7 @@ Press `Ctrl-C` to cleanly close the tunnel and exit. The control WebSocket is cl
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Log level filter (e.g. `debug`, `info`, `warn`, `rustunnel=debug`). Default: `warn`. |
-| `RUSTUNNEL_TOKEN` | Auth token, used when `--token` is not passed. Takes precedence over the config file. |
+| `RUSTUNNEL_TOKEN` | Auth token for the `http`, `tcp`, `udp`, and `p2p` commands, used when `--token` is not passed (takes precedence over the config file; empty values are ignored). `start` reads tokens from the config file only, and `token create` authenticates with `--admin-token`. |
 
 **Examples:**
 
