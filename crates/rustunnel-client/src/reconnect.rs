@@ -14,6 +14,8 @@ use tracing::{info, warn};
 
 use crate::config::{ClientConfig, TunnelDef};
 use crate::control;
+use crate::error::{Error, Result};
+use crate::output;
 
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
@@ -22,18 +24,28 @@ const JITTER: f64 = 0.20; // ±20 %
 
 /// Run `connect` with exponential-backoff retry on failure.
 ///
-/// Returns only when the connection ends cleanly (e.g. Ctrl-C) or after a
-/// fatal, non-retryable error.
-pub async fn run_with_reconnect(config: ClientConfig, tunnels: Vec<TunnelDef>) {
+/// Returns `Ok(())` when the connection ends cleanly (e.g. Ctrl-C) and
+/// `Err(_)` on a fatal, non-retryable error (auth rejection).
+pub async fn run_with_reconnect(config: ClientConfig, tunnels: Vec<TunnelDef>) -> Result<()> {
     let mut delay = INITIAL_DELAY;
     let mut attempt: u32 = 0;
+    let mut last_error = String::new();
 
     loop {
         if attempt > 0 {
-            eprintln!(
-                "  Reconnecting in {:.1}s (attempt {attempt})…",
-                delay.as_secs_f64()
-            );
+            output::note_reconnecting();
+            if output::json_mode() {
+                output::emit(&output::Event::Reconnecting {
+                    attempt,
+                    reason: last_error.clone(),
+                    delay_secs: delay.as_secs_f64(),
+                });
+            } else {
+                eprintln!(
+                    "  Reconnecting in {:.1}s (attempt {attempt})…",
+                    delay.as_secs_f64()
+                );
+            }
             tokio::time::sleep(delay).await;
             delay = next_delay(delay);
         }
@@ -44,16 +56,15 @@ pub async fn run_with_reconnect(config: ClientConfig, tunnels: Vec<TunnelDef>) {
             Ok(()) => {
                 // Clean exit (e.g. Ctrl-C) — stop retrying.
                 info!("connection closed cleanly");
-                return;
+                return Ok(());
             }
             Err(e) => {
                 // Auth failures are fatal — no point retrying.
-                let err_str = e.to_string();
-                if err_str.contains("auth") || err_str.contains("Auth") {
-                    eprintln!("  Fatal: {e}");
-                    return;
+                if matches!(e, Error::Auth(_)) {
+                    return Err(e);
                 }
                 warn!("connection error: {e}");
+                last_error = e.to_string();
                 attempt += 1;
             }
         }

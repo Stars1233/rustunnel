@@ -41,6 +41,7 @@ You can self-host or use our managed service.
   - [Installation](#installation)
   - [Setup wizard](#setup-wizard)
   - [Quick start (CLI flags)](#quick-start-cli-flags)
+  - [Machine-readable output (`--json`)](#machine-readable-output---json)
   - [Config file](#config-file)
   - [Token management](#token-management)
 - [Port reference](#port-reference)
@@ -786,6 +787,35 @@ rustunnel tcp 5432 \
 # Disable automatic reconnection
 rustunnel http 3000 --no-reconnect
 ```
+
+### Machine-readable output (`--json`)
+
+All tunnel-running commands (`http`, `tcp`, `udp`, `p2p`, `start`) and
+`token create` accept a `--json` flag. With it, stdout emits NDJSON —
+one JSON event object per line — instead of the human-readable startup
+box, which makes the CLI easy to drive from scripts and AI agents:
+
+```bash
+rustunnel http 3000 --json --token YOUR_AUTH_TOKEN
+```
+
+```json
+{"event":"tunnel_ready","protocol":"http","public_url":"https://myapp.eu.edge.rustunnel.com","local_port":3000,"local_host":"localhost","tunnel_id":"6f9a…","name":"myapp"}
+```
+
+Events:
+
+| Event | When | Fields |
+|-------|------|--------|
+| `tunnel_ready` | Tunnel registered and accepting traffic | `protocol`, `public_url`, `public_addr` (host:port, tcp/udp only), `local_port`, `local_host`, `tunnel_id`, `name` |
+| `reconnecting` | Connection dropped, retry scheduled | `attempt`, `reason`, `delay_secs` |
+| `reconnected` | Reconnect succeeded (fresh `tunnel_ready` events follow) | — |
+| `error` | Fatal error; process exits with code 1 | `code` (`config`/`auth`/`tunnel`/`connection`/`protocol`/`io`), `message`, `hint` |
+| `token_created` | `token create --json` succeeded | `token`, `name`, `id` |
+
+Diagnostics still go to stderr, so stdout stays valid NDJSON. The auth
+token can also be supplied via the `RUSTUNNEL_TOKEN` environment variable
+instead of `--token`.
 
 ### Config file
 

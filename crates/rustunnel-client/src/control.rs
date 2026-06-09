@@ -51,6 +51,7 @@ use rustunnel_protocol::{decode_frame, encode_frame, ControlFrame, TunnelProtoco
 use crate::config::{ClientConfig, TunnelDef};
 use crate::display::{self, TunnelDisplay};
 use crate::error::{Error, Result};
+use crate::output;
 use crate::proxy;
 
 // ── timeouts & intervals ──────────────────────────────────────────────────────
@@ -243,7 +244,13 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     } else {
         tokio_tungstenite::connect_async(&ctrl_url).await
     }
-    .map_err(|e| Error::Connection(format!("control WS: {e}")))?;
+    .map_err(|e| {
+        Error::Connection(format!(
+            "cannot reach {} ({e}) — check network/DNS, or pass --server <host:port> \
+             or --region <eu|us|ap> to pick a different edge",
+            config.server
+        ))
+    })?;
 
     sp.set_message("Authenticating…");
 
@@ -258,39 +265,57 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     )
     .await?;
 
-    let (session_id, server_supports_lb) =
-        match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT).await? {
-            ControlFrame::AuthOk {
-                session_id,
-                server_version,
-            } => {
-                info!(%session_id, %server_version, "authenticated");
-                // TUNNEL-7 Phase 6: gate emission of the new wire fields and
-                // probe-loop spawning on server version. An older edge that
-                // doesn't recognise `TunnelHealthy` / `TunnelUnhealthy` would
-                // log a `decode_frame` warning per frame; we just refrain
-                // from sending them.
-                let supports_lb = crate::version::server_supports_load_balancing(&server_version);
-                if !supports_lb {
-                    debug!(
-                        %server_version,
-                        "server does not advertise TUNNEL-7 load-balancing support; \
-                         group fields and health probes will be suppressed for this session"
-                    );
-                }
-                (session_id, supports_lb)
+    let (session_id, server_supports_lb) = match recv_frame_timeout(&mut ctrl_ws, AUTH_TIMEOUT)
+        .await
+        .map_err(|e| with_server_context(e, &config.server))?
+    {
+        ControlFrame::AuthOk {
+            session_id,
+            server_version,
+        } => {
+            info!(%session_id, %server_version, "authenticated");
+            // TUNNEL-7 Phase 6: gate emission of the new wire fields and
+            // probe-loop spawning on server version. An older edge that
+            // doesn't recognise `TunnelHealthy` / `TunnelUnhealthy` would
+            // log a `decode_frame` warning per frame; we just refrain
+            // from sending them.
+            let supports_lb = crate::version::server_supports_load_balancing(&server_version);
+            if !supports_lb {
+                debug!(
+                    %server_version,
+                    "server does not advertise TUNNEL-7 load-balancing support; \
+                     group fields and health probes will be suppressed for this session"
+                );
             }
-            ControlFrame::AuthError { message } => {
-                sp.finish_and_clear();
-                return Err(Error::Auth(message));
-            }
-            other => {
-                sp.finish_and_clear();
-                return Err(Error::Connection(format!(
-                    "unexpected frame during auth: {other:?}"
-                )));
-            }
-        };
+            (session_id, supports_lb)
+        }
+        ControlFrame::AuthError { message } => {
+            sp.finish_and_clear();
+            let token_desc = if config.auth_token.as_deref().unwrap_or("").is_empty() {
+                "no auth token was provided".to_string()
+            } else {
+                format!(
+                    "the token came from the {}",
+                    config
+                        .auth_token_source
+                        .as_deref()
+                        .unwrap_or("client configuration")
+                )
+            };
+            return Err(Error::Auth(format!(
+                "server {} rejected authentication: {message} ({token_desc}) — \
+                     get a token at https://rustunnel.com (Dashboard -> API Keys), \
+                     or for a self-hosted server create one with `rustunnel token create`",
+                config.server
+            )));
+        }
+        other => {
+            sp.finish_and_clear();
+            return Err(Error::Connection(format!(
+                "unexpected frame during auth: {other:?}"
+            )));
+        }
+    };
 
     sp.set_message("Registering tunnels…");
 
@@ -488,16 +513,44 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
     }
 
     // 5. Print startup display ————————————————————————————————————————————
-    let display_tunnels: Vec<TunnelDisplay> = registered
-        .iter()
-        .map(|(t, url)| TunnelDisplay {
-            name: t.subdomain.clone().unwrap_or_else(|| "tunnel".into()),
-            proto: t.proto.clone(),
-            local: format!("{}:{}", t.local_host, t.local_port),
-            public_url: url.clone(),
-        })
-        .collect();
-    display::print_startup_box(&display_tunnels);
+    //    Human mode: startup box. JSON mode: one NDJSON `tunnel_ready` event
+    //    per tunnel (preceded by `reconnected` when this is a re-connect).
+    if output::json_mode() {
+        if output::take_reconnect_pending() {
+            output::emit(&output::Event::Reconnected);
+        }
+        for (t, url) in &registered {
+            // P2P subscribers don't register a tunnel and have no URL of
+            // their own — report the target they are wired to instead.
+            let url = if url.is_empty() {
+                match &t.p2p_target {
+                    Some(target) => format!("p2p://{target}"),
+                    None => continue,
+                }
+            } else {
+                url.clone()
+            };
+            output::emit(&output::Event::tunnel_ready(
+                &t.proto,
+                &url,
+                t.local_port,
+                &t.local_host,
+                t.registered_tunnel_id.map(|id| id.to_string()),
+                t.subdomain.clone().or_else(|| t.p2p_name.clone()),
+            ));
+        }
+    } else {
+        let display_tunnels: Vec<TunnelDisplay> = registered
+            .iter()
+            .map(|(t, url)| TunnelDisplay {
+                name: t.subdomain.clone().unwrap_or_else(|| "tunnel".into()),
+                proto: t.proto.clone(),
+                local: format!("{}:{}", t.local_host, t.local_port),
+                public_url: url.clone(),
+            })
+            .collect();
+        display::print_startup_box(&display_tunnels);
+    }
 
     // 6. Spawn health-probe tasks for tunnels with a health_check ─────────
     //    Each probe task writes `TunnelHealthy` / `TunnelUnhealthy` frames
@@ -901,6 +954,15 @@ async fn drive_client_mux(mut conn: DataConn, stream_tx: mpsc::Sender<(Uuid, Yam
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Append the server address to connection-class errors so timeout/closed
+/// messages say *which* server did not answer.
+fn with_server_context(e: Error, server: &str) -> Error {
+    match e {
+        Error::Connection(msg) => Error::Connection(format!("{msg} (server {server})")),
+        other => other,
+    }
+}
 
 fn proto_to_enum(proto: &str) -> Result<TunnelProtocol> {
     match proto.to_lowercase().as_str() {
