@@ -53,4 +53,4 @@ socket2 = { version = "0.5", features = ["all"] }
 quinn = "0.11"
 sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "tracing", "logs"] }
 sentry-tracing = "0.47"
-rustunnel-protocol = { path = "crates/rustunnel-protocol", version = "0.8.0" }
+rustunnel-protocol = { path = "crates/rustunnel-protocol", version = "0.8.1" }

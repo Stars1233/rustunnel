@@ -1,0 +1,78 @@
+# Publishes server.json to the official MCP registry
+# (registry.modelcontextprotocol.io) using GitHub OIDC — no tokens or device
+# codes. Called by release.yml after each release, and runnable any time from
+# the Actions tab (workflow_dispatch) to retry a publish — e.g. after the
+# registry deploys support for a new package type.
+#
+# Packages are generated from the release's .mcpb assets by
+# deploy/mcpb/make-server-json.sh; the checked-in server.json provides the
+# static fields (and a cargo package the production registry doesn't accept
+# yet — the script drops it until registry > v1.7.9 ships).
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.8.1)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC authentication with the MCP registry
+      contents: read
+
+    steps:
+      # Check out the tag being published so server.json and the generator
+      # script match the release, even on manual re-runs from the Actions tab.
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download .mcpb checksums from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p shas
+          gh release download "${{ inputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "rustunnel-mcp-*.mcpb.sha256" \
+            --dir shas
+          ls -l shas/
+
+      - name: Generate server.json
+        run: |
+          VERSION="${TAG#v}"
+          ./deploy/mcpb/make-server-json.sh "$VERSION" shas server.json > server.publish.json
+          mv server.publish.json server.json
+          jq '{name, version, packages: [.packages[] | {registryType, identifier}]}' server.json
+        env:
+          TAG: ${{ inputs.tag }}
+
+      # Pinned (this job holds an OIDC credential for our registry namespace —
+      # don't run an unpinned upstream binary with it). Checksum comes from the
+      # same release's checksums file; bump the tag deliberately.
+      - name: Install mcp-publisher
+        env:
+          PUBLISHER_TAG: v1.7.9
+        run: |
+          ASSET="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
+          BASE="https://github.com/modelcontextprotocol/registry/releases/download/${PUBLISHER_TAG}"
+          curl -fsSLO "${BASE}/${ASSET}"
+          curl -fsSL "${BASE}/registry_${PUBLISHER_TAG#v}_checksums.txt" | grep " ${ASSET}\$" | sha256sum -c -
+          tar xzf "${ASSET}" mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish

@@ -177,9 +177,61 @@ jobs:
             rustunnel-server-linux-x86_64.sha256
           retention-days: 1
 
+  build-mcpb:
+    name: Package MCPB bundles
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pattern also matches release-server-* / release-mcpb on re-runs;
+      # harmless — the loop below selects exact filenames.
+      - name: Download client/MCP artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: archives/
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Repack archives into .mcpb bundles
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p mcpb-out
+          # One bundle per OS/arch the registry should offer. linux x86_64
+          # uses the musl build (fully static — runs on any distro).
+          # (No aarch64-musl build exists in the matrix, so the linux arm64
+          # bundle is glibc-based and won't run on Alpine ARM hosts.)
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-gnu \
+            x86_64-pc-windows-msvc; do
+            archive=""
+            for ext in tar.gz zip; do
+              f="archives/rustunnel-v${VERSION}-${target}.${ext}"
+              if [[ -f "$f" ]]; then archive=$f; break; fi
+            done
+            if [[ -z "$archive" ]]; then
+              echo "::error::no archive found for ${target}"
+              exit 1
+            fi
+            ./deploy/mcpb/build-mcpb.sh "$VERSION" "$target" "$archive" mcpb-out
+          done
+          ls -lh mcpb-out/
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mcpb
+          path: mcpb-out/*
+          retention-days: 1
+
   publish:
     name: Create GitHub Release
-    needs: [build, build-server]
+    needs: [build, build-server, build-mcpb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -231,3 +283,15 @@ jobs:
             "${{ github.ref_name }}" \
             "joaoh82/rustunnel" \
             "joaoh82/homebrew-rustunnel"
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs: [publish]
+    # Skip pre-releases, same as the Homebrew update.
+    if: ${{ !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/publish-mcp.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      id-token: write
+      contents: read

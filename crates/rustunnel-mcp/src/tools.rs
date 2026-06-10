@@ -62,6 +62,40 @@ fn resolve_token(args: &Value, state: &State) -> Option<String> {
     )
 }
 
+/// Locate the `rustunnel` CLI binary that `create_tunnel` spawns.
+///
+/// Resolution order:
+/// 1. `RUSTUNNEL_CLI` env var — set by packaged installs (e.g. the MCPB
+///    bundle points it at the CLI shipped inside the bundle).
+/// 2. A `rustunnel` binary sitting next to this `rustunnel-mcp` executable —
+///    covers bundles and tarball installs without any configuration.
+/// 3. Plain `rustunnel`, resolved through `PATH` (the historical behaviour).
+fn resolve_cli_path() -> PathBuf {
+    resolve_cli_path_from(std::env::var("RUSTUNNEL_CLI").ok().as_deref())
+}
+
+/// Pure resolution logic, split out so it can be unit-tested without
+/// mutating process environment (env mutation races with parallel tests).
+fn resolve_cli_path_from(env_override: Option<&str>) -> PathBuf {
+    if let Some(p) = env_override.map(str::trim).filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let name = if cfg!(windows) {
+                "rustunnel.exe"
+            } else {
+                "rustunnel"
+            };
+            let sibling = dir.join(name);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from("rustunnel")
+}
+
 // ── tool definitions (returned by tools/list) ─────────────────────────────────
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -536,7 +570,8 @@ async fn create_tunnel(args: &Value, state: &Arc<State>) -> Value {
     };
 
     // Build and spawn the CLI command.
-    let mut cmd = tokio::process::Command::new("rustunnel");
+    let cli = resolve_cli_path();
+    let mut cmd = tokio::process::Command::new(&cli);
     cmd.args(&plan.args)
         // Suppress CLI output so it doesn't interfere with MCP stdio.
         .stdin(std::process::Stdio::null())
@@ -547,8 +582,10 @@ async fn create_tunnel(args: &Value, state: &Arc<State>) -> Value {
         Err(e) => {
             cleanup_temp(&plan.temp_config);
             return tool_err(format!(
-                "failed to spawn rustunnel: {e}. \
-                Is the 'rustunnel' binary installed and in PATH?"
+                "failed to spawn rustunnel ({}): {e}. \
+                Install the 'rustunnel' CLI and put it on PATH, \
+                or point the RUSTUNNEL_CLI env var at the binary.",
+                cli.display()
             ));
         }
     };
@@ -892,5 +929,28 @@ mod tests {
     #[test]
     fn yaml_str_escapes() {
         assert_eq!(yaml_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn resolve_cli_path_prefers_env_override() {
+        assert_eq!(
+            resolve_cli_path_from(Some("/opt/custom/rustunnel")),
+            PathBuf::from("/opt/custom/rustunnel")
+        );
+        // Surrounding whitespace is trimmed off the override.
+        assert_eq!(
+            resolve_cli_path_from(Some("  /opt/custom/rustunnel ")),
+            PathBuf::from("/opt/custom/rustunnel")
+        );
+        // Whitespace-only / unset → sibling lookup or bare PATH name.
+        for empty in [Some("   "), None] {
+            let p = resolve_cli_path_from(empty);
+            let name = if cfg!(windows) {
+                "rustunnel.exe"
+            } else {
+                "rustunnel"
+            };
+            assert!(p.ends_with(name));
+        }
     }
 }
