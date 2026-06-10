@@ -62,6 +62,36 @@ fn resolve_token(args: &Value, state: &State) -> Option<String> {
     )
 }
 
+/// Locate the `rustunnel` CLI binary that `create_tunnel` spawns.
+///
+/// Resolution order:
+/// 1. `RUSTUNNEL_CLI` env var — set by packaged installs (e.g. the MCPB
+///    bundle points it at the CLI shipped inside the bundle).
+/// 2. A `rustunnel` binary sitting next to this `rustunnel-mcp` executable —
+///    covers bundles and tarball installs without any configuration.
+/// 3. Plain `rustunnel`, resolved through `PATH` (the historical behaviour).
+fn resolve_cli_path() -> PathBuf {
+    if let Ok(p) = std::env::var("RUSTUNNEL_CLI") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let name = if cfg!(windows) {
+                "rustunnel.exe"
+            } else {
+                "rustunnel"
+            };
+            let sibling = dir.join(name);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from("rustunnel")
+}
+
 // ── tool definitions (returned by tools/list) ─────────────────────────────────
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -536,7 +566,8 @@ async fn create_tunnel(args: &Value, state: &Arc<State>) -> Value {
     };
 
     // Build and spawn the CLI command.
-    let mut cmd = tokio::process::Command::new("rustunnel");
+    let cli = resolve_cli_path();
+    let mut cmd = tokio::process::Command::new(&cli);
     cmd.args(&plan.args)
         // Suppress CLI output so it doesn't interfere with MCP stdio.
         .stdin(std::process::Stdio::null())
@@ -547,8 +578,10 @@ async fn create_tunnel(args: &Value, state: &Arc<State>) -> Value {
         Err(e) => {
             cleanup_temp(&plan.temp_config);
             return tool_err(format!(
-                "failed to spawn rustunnel: {e}. \
-                Is the 'rustunnel' binary installed and in PATH?"
+                "failed to spawn rustunnel ({}): {e}. \
+                Install the 'rustunnel' CLI and put it on PATH, \
+                or point the RUSTUNNEL_CLI env var at the binary.",
+                cli.display()
             ));
         }
     };
@@ -892,5 +925,18 @@ mod tests {
     #[test]
     fn yaml_str_escapes() {
         assert_eq!(yaml_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn resolve_cli_path_prefers_env_var() {
+        // Serialize env mutation: cargo runs tests in parallel within one
+        // process, but no other test in this crate touches RUSTUNNEL_CLI.
+        std::env::set_var("RUSTUNNEL_CLI", "/opt/custom/rustunnel");
+        assert_eq!(resolve_cli_path(), PathBuf::from("/opt/custom/rustunnel"));
+        std::env::set_var("RUSTUNNEL_CLI", "   ");
+        // Whitespace-only is treated as unset → sibling lookup or PATH name.
+        let p = resolve_cli_path();
+        assert!(p == std::path::Path::new("rustunnel") || p.ends_with("rustunnel"));
+        std::env::remove_var("RUSTUNNEL_CLI");
     }
 }

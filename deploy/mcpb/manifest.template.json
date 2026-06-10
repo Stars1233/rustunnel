@@ -1,0 +1,71 @@
+{
+  "manifest_version": "0.3",
+  "name": "rustunnel",
+  "display_name": "rustunnel",
+  "version": "__VERSION__",
+  "description": "Give AI agents public HTTPS/TCP/UDP URLs for any localhost service. Open source, self-hostable.",
+  "long_description": "rustunnel exposes services running on localhost through public URLs — test webhooks against a local server, share a dev build, or let another agent or device reach a local port. This bundle ships the rustunnel-mcp MCP server plus the rustunnel CLI it drives, so no separate install is needed. Six tools cover the full lifecycle: create_tunnel, list_tunnels, close_tunnel, get_connection_info, list_regions, get_tunnel_history — including custom subdomains, region pinning, P2P, and load-balanced pools with health checks. Use the managed cloud at rustunnel.com (free tier available) or point it at your own self-hosted server (AGPL).",
+  "author": {
+    "name": "rustunnel",
+    "url": "https://rustunnel.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joaoh82/rustunnel"
+  },
+  "homepage": "https://rustunnel.com",
+  "documentation": "https://rustunnel.com/docs/guides/mcp-server",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/rustunnel-mcp__EXE__",
+    "mcp_config": {
+      "command": "${__dirname}/server/rustunnel-mcp__EXE__",
+      "args": [
+        "--server",
+        "${user_config.server}",
+        "--api",
+        "${user_config.api_url}"
+      ],
+      "env": {
+        "RUSTUNNEL_TOKEN": "${user_config.token}",
+        "RUSTUNNEL_CLI": "${__dirname}/server/rustunnel__EXE__"
+      }
+    }
+  },
+  "tools": [
+    { "name": "create_tunnel", "description": "Open a tunnel to a local service and get a public URL (HTTP/TCP/UDP, P2P, load-balanced pools)" },
+    { "name": "list_tunnels", "description": "List active tunnels and their public URLs" },
+    { "name": "close_tunnel", "description": "Close a tunnel by ID" },
+    { "name": "get_connection_info", "description": "Get the CLI command for a tunnel instead of spawning it" },
+    { "name": "list_regions", "description": "List edge regions (eu / us / ap)" },
+    { "name": "get_tunnel_history", "description": "Audit past tunnel activity" }
+  ],
+  "keywords": ["tunnel", "ngrok", "webhook", "localhost", "https", "expose", "ai-agent"],
+  "license": "AGPL-3.0",
+  "user_config": {
+    "server": {
+      "type": "string",
+      "title": "Tunnel server address",
+      "description": "Control-plane address. Hosted: eu.edge.rustunnel.com:4040 (or us/ap). Self-hosted: your-host:4040.",
+      "default": "eu.edge.rustunnel.com:4040",
+      "required": true
+    },
+    "api_url": {
+      "type": "string",
+      "title": "Dashboard API URL",
+      "description": "REST API base URL. Hosted: https://eu.edge.rustunnel.com:8443 (match the server region). Self-hosted: https://your-host:8443.",
+      "default": "https://eu.edge.rustunnel.com:8443",
+      "required": true
+    },
+    "token": {
+      "type": "string",
+      "title": "API token",
+      "description": "Create one free at rustunnel.com → Dashboard → API Keys (or use your self-hosted admin token).",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["__PLATFORM__"]
+  }
+}
