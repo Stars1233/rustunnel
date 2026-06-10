@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.joaoh82/rustunnel",
   "title": "rustunnel",
-  "description": "Expose any localhost service so an AI agent can reach it — public HTTPS/TCP/UDP URLs via six MCP tools. Open source, self-hostable.",
+  "description": "Give AI agents public HTTPS/TCP/UDP URLs for any localhost service. Open source, self-hostable.",
   "repository": {
     "url": "https://github.com/joaoh82/rustunnel",
     "source": "github"
