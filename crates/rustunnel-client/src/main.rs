@@ -11,6 +11,7 @@ mod control;
 mod display;
 mod error;
 mod health;
+mod output;
 mod p2p_direct;
 mod proxy;
 mod reconnect;
@@ -78,7 +79,7 @@ struct TunnelArgs {
     server: Option<String>,
 
     /// Auth token (overrides config file)
-    #[arg(long)]
+    #[arg(long, env = "RUSTUNNEL_TOKEN")]
     token: Option<String>,
 
     /// Local hostname to forward to
@@ -97,6 +98,12 @@ struct TunnelArgs {
     /// Skip TLS certificate verification (local dev only — do not use in production)
     #[arg(long)]
     insecure: bool,
+
+    /// Emit machine-readable NDJSON events (one JSON object per line) on
+    /// stdout instead of human-readable output. Events: tunnel_ready,
+    /// reconnecting, reconnected, error.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Clone)]
@@ -121,7 +128,7 @@ struct P2pArgs {
     server: Option<String>,
 
     /// Auth token (overrides config file)
-    #[arg(long)]
+    #[arg(long, env = "RUSTUNNEL_TOKEN")]
     token: Option<String>,
 
     /// Local hostname to forward to
@@ -139,6 +146,12 @@ struct P2pArgs {
     /// Skip TLS certificate verification (local dev only)
     #[arg(long)]
     insecure: bool,
+
+    /// Emit machine-readable NDJSON events (one JSON object per line) on
+    /// stdout instead of human-readable output. Events: tunnel_ready,
+    /// reconnecting, reconnected, error.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -146,6 +159,12 @@ struct StartArgs {
     /// Path to config file (default: ~/.rustunnel/config.yml)
     #[arg(long, short)]
     config: Option<PathBuf>,
+
+    /// Emit machine-readable NDJSON events (one JSON object per line) on
+    /// stdout instead of human-readable output. Events: tunnel_ready,
+    /// reconnecting, reconnected, error.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -169,6 +188,11 @@ enum TokenAction {
         /// Admin token for authentication
         #[arg(long)]
         admin_token: Option<String>,
+
+        /// Emit the created token as a single machine-readable JSON line
+        /// ({"event":"token_created",...}) instead of human-readable output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -185,7 +209,16 @@ async fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e}");
+        if output::json_mode() {
+            // Machine-readable fatal error: one JSON line on stdout, exit 1.
+            output::emit(&output::Event::Error {
+                code: e.code().to_string(),
+                message: e.to_string(),
+                hint: e.hint().map(str::to_string),
+            });
+        } else {
+            eprintln!("error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -205,11 +238,16 @@ async fn run(cli: Cli) -> error::Result<()> {
 // ── subcommand handlers ───────────────────────────────────────────────────────
 
 async fn run_tunnel(proto: &str, args: TunnelArgs) -> error::Result<()> {
+    output::set_json_mode(args.json);
+
     let mut cfg = ClientConfig::load_default()?;
 
-    // Token and insecure apply unconditionally.
-    if let Some(t) = args.token {
+    // Token and insecure apply unconditionally. An empty/whitespace-only
+    // value (e.g. `RUSTUNNEL_TOKEN=""` filling the arg via clap's env
+    // support) counts as absent so it never clobbers a config-file token.
+    if let Some(t) = args.token.filter(|t| !t.trim().is_empty()) {
         cfg.auth_token = Some(t);
+        cfg.auth_token_source = Some("--token flag / RUSTUNNEL_TOKEN env var".into());
     }
     if args.insecure {
         cfg.insecure = true;
@@ -240,16 +278,20 @@ async fn run_tunnel(proto: &str, args: TunnelArgs) -> error::Result<()> {
     if args.no_reconnect {
         control::connect(&cfg, &tunnels).await
     } else {
-        reconnect::run_with_reconnect(cfg, tunnels).await;
-        Ok(())
+        reconnect::run_with_reconnect(cfg, tunnels).await
     }
 }
 
 async fn run_p2p(args: P2pArgs) -> error::Result<()> {
+    output::set_json_mode(args.json);
+
     let mut cfg = ClientConfig::load_default()?;
 
-    if let Some(t) = args.token {
+    // Empty/whitespace-only token (e.g. `RUSTUNNEL_TOKEN=""`) counts as
+    // absent so it never clobbers a config-file token.
+    if let Some(t) = args.token.filter(|t| !t.trim().is_empty()) {
         cfg.auth_token = Some(t);
+        cfg.auth_token_source = Some("--token flag / RUSTUNNEL_TOKEN env var".into());
     }
     if args.insecure {
         cfg.insecure = true;
@@ -286,12 +328,13 @@ async fn run_p2p(args: P2pArgs) -> error::Result<()> {
     if args.no_reconnect {
         control::connect(&cfg, &tunnels).await
     } else {
-        reconnect::run_with_reconnect(cfg, tunnels).await;
-        Ok(())
+        reconnect::run_with_reconnect(cfg, tunnels).await
     }
 }
 
 async fn run_start(args: StartArgs) -> error::Result<()> {
+    output::set_json_mode(args.json);
+
     let mut cfg = match args.config {
         Some(path) => ClientConfig::load_from(&path)?,
         None => ClientConfig::load_default()?,
@@ -312,8 +355,7 @@ async fn run_start(args: StartArgs) -> error::Result<()> {
     }
 
     let tunnels: Vec<TunnelDef> = cfg.tunnels.values().cloned().collect();
-    reconnect::run_with_reconnect(cfg, tunnels).await;
-    Ok(())
+    reconnect::run_with_reconnect(cfg, tunnels).await
 }
 
 async fn run_token(cmd: TokenCmd) -> error::Result<()> {
@@ -322,7 +364,10 @@ async fn run_token(cmd: TokenCmd) -> error::Result<()> {
             name,
             server,
             admin_token,
+            json,
         } => {
+            output::set_json_mode(json);
+
             let dashboard = server.unwrap_or_else(|| "localhost:4040".to_string());
             let token = admin_token.unwrap_or_default();
 
@@ -334,22 +379,40 @@ async fn run_token(cmd: TokenCmd) -> error::Result<()> {
                 .json(&serde_json::json!({ "label": name }))
                 .send()
                 .await
-                .map_err(|e| error::Error::Connection(e.to_string()))?;
+                .map_err(|e| {
+                    error::Error::Connection(format!(
+                        "cannot reach dashboard API at {url} ({e}) — \
+                         pass --server <host:port> of the dashboard API"
+                    ))
+                })?;
 
             if resp.status().is_success() {
-                let body: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| error::Error::Connection(e.to_string()))?;
-                println!("Token created:");
-                println!("  id:    {}", body["id"].as_str().unwrap_or("?"));
-                println!("  token: {}", body["token"].as_str().unwrap_or("?"));
-                println!("  label: {}", body["label"].as_str().unwrap_or("?"));
+                let body: serde_json::Value = resp.json().await.map_err(|e| {
+                    error::Error::Connection(format!("invalid response from {url}: {e}"))
+                })?;
+                if output::json_mode() {
+                    output::emit(&output::Event::TokenCreated {
+                        token: body["token"].as_str().unwrap_or("?").to_string(),
+                        name: body["label"].as_str().unwrap_or(&name).to_string(),
+                        id: body["id"].as_str().map(str::to_string),
+                    });
+                } else {
+                    println!("Token created:");
+                    println!("  id:    {}", body["id"].as_str().unwrap_or("?"));
+                    println!("  token: {}", body["token"].as_str().unwrap_or("?"));
+                    println!("  label: {}", body["label"].as_str().unwrap_or("?"));
+                }
             } else {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    return Err(error::Error::Auth(format!(
+                        "token creation rejected by {dashboard} ({status}): {text} — \
+                         pass a valid --admin-token (the server's admin token)"
+                    )));
+                }
                 return Err(error::Error::Connection(format!(
-                    "token creation failed ({status}): {text}"
+                    "token creation failed ({status} from {dashboard}): {text}"
                 )));
             }
         }
@@ -478,6 +541,9 @@ fn init_tracing() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .with_target(false)
+        // Diagnostics go to stderr so stdout stays clean for tunnel output
+        // (and valid NDJSON in --json mode).
+        .with_writer(std::io::stderr)
         .compact()
         .init();
 }

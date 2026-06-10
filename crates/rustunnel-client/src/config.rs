@@ -21,6 +21,11 @@ pub struct ClientConfig {
     /// Auth token sent in the `Auth` control frame.
     pub auth_token: Option<String>,
 
+    /// Where `auth_token` came from (`--token` flag, env var, config file…).
+    /// Runtime-only — used to make auth error messages self-describing.
+    #[serde(skip)]
+    pub auth_token_source: Option<String>,
+
     /// Skip TLS certificate verification (for local development only).
     #[serde(default)]
     pub insecure: bool,
@@ -208,7 +213,12 @@ impl ClientConfig {
                 path.as_ref().display()
             ))
         })?;
-        serde_yaml::from_str(&raw).map_err(|e| Error::Config(format!("invalid config YAML: {e}")))
+        let mut cfg: Self = serde_yaml::from_str(&raw)
+            .map_err(|e| Error::Config(format!("invalid config YAML: {e}")))?;
+        if cfg.auth_token.is_some() {
+            cfg.auth_token_source = Some(format!("config file {}", path.as_ref().display()));
+        }
+        Ok(cfg)
     }
 
     /// Validate that required fields are present.

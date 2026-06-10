@@ -489,12 +489,13 @@ This table summarises all flags across all commands:
 | Flag | Commands | Description |
 |------|----------|-------------|
 | `--server <host:port>` | http, tcp | Tunnel server address (bypasses region selection) |
-| `--token <token>` | http, tcp | Auth token (overrides config) |
+| `--token <token>` | http, tcp | Auth token (overrides config; also read from `RUSTUNNEL_TOKEN`) |
 | `--subdomain <name>` | http | Requested HTTP subdomain |
 | `--local-host <host>` | http, tcp | Local hostname (default: `localhost`) |
 | `--region <id>` | http, tcp | Region: `eu`, `us`, `ap`, or `auto`. Ignored if `--server` is set. |
 | `--no-reconnect` | http, tcp | Exit on failure instead of reconnecting |
 | `--insecure` | http, tcp | Skip TLS certificate verification |
+| `--json` | http, tcp, udp, p2p, start, token create | Emit machine-readable NDJSON events on stdout instead of human output |
 | `-c, --config <path>` | start | Config file path |
 | `--name <label>` | token create | Token label (required) |
 | `--admin-token <token>` | token create | Admin token for dashboard API |
@@ -563,6 +564,7 @@ Each delay has ±20% random jitter to prevent thundering-herd reconnects when a 
 The following errors cause an immediate exit — retrying would not help:
 
 - **Auth failed** — invalid or revoked token. Fix: create a new token at [rustunnel.com](https://rustunnel.com) (Dashboard → API Keys) and update your config.
+- **Tunnel error** — the server rejected the registration (subdomain already taken, tunnel limit reached). Fix: pick a different `--subdomain` or close an existing tunnel.
 - **Config error** — missing required fields. Fix: check your `~/.rustunnel/config.yml`.
 
 ### Disabling reconnect
@@ -610,6 +612,16 @@ Color coding:
 - Public URL — **bold green**
 - Border — cyan
 
+### JSON output (`--json`)
+
+With `--json`, the spinner and startup box are suppressed and stdout instead carries NDJSON — one JSON event object per line — for scripts and AI agents:
+
+```json
+{"event":"tunnel_ready","protocol":"http","public_url":"https://myapp.tunnel.example.com","local_port":3000,"local_host":"localhost","tunnel_id":"6f9a…","name":"myapp"}
+```
+
+Events: `tunnel_ready` (includes `public_addr` host:port for tcp/udp), `reconnecting` (`attempt`, `reason`, `delay_secs`), `reconnected`, `error` (`code`, `message`, `hint`; exit code 1 follows), and `token_created` (for `token create --json`). Diagnostics still go to stderr.
+
 ### Graceful shutdown
 
 Press `Ctrl-C` to cleanly close the tunnel and exit. The control WebSocket is closed before the process exits.
@@ -621,6 +633,7 @@ Press `Ctrl-C` to cleanly close the tunnel and exit. The control WebSocket is cl
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Log level filter (e.g. `debug`, `info`, `warn`, `rustunnel=debug`). Default: `warn`. |
+| `RUSTUNNEL_TOKEN` | Auth token for the `http`, `tcp`, `udp`, and `p2p` commands, used when `--token` is not passed (takes precedence over the config file; empty values are ignored). `start` reads tokens from the config file only, and `token create` authenticates with `--admin-token`. |
 
 **Examples:**
 
@@ -635,7 +648,7 @@ RUST_LOG=rustunnel=debug rustunnel http 3000
 RUST_LOG=error rustunnel http 3000
 ```
 
-Log output goes to **stderr**. Normal tunnel output (startup box, reconnect messages) goes to **stdout**.
+Log output and human-readable reconnect notices go to **stderr**. Normal tunnel output (startup box, or NDJSON events with `--json`) goes to **stdout**.
 
 ---
 
@@ -646,7 +659,7 @@ Log output goes to **stderr**. Normal tunnel output (startup box, reconnect mess
 | `config error: server address is required` | No `--server` flag and no config file | Add `server:` to `~/.rustunnel/config.yml` or pass `--server` |
 | `auth failed: <message>` | Token invalid or revoked | Create a new token at [rustunnel.com](https://rustunnel.com) (Dashboard → API Keys) or with `rustunnel token create` for self-hosted setups |
 | `tunnel error: <message>` | Subdomain already in use or server limit reached | Use a different `--subdomain` or wait |
-| `connection error: control WS: …` | Can't reach the server | Check network, firewall, and server address |
+| `connection error: cannot reach <server> (…)` | Can't reach the server | Check network, firewall, and server address; pass `--server <host:port>` or `--region <id>` |
 | `connection error: heartbeat timeout` | Server stopped responding to pings | Transient — reconnect loop will retry |
 | `connection error: timeout waiting for server response` | Auth/registration timed out (10 s) | Check server health; may be overloaded |
 | `no tunnels defined in config file` | `rustunnel start` with an empty `tunnels:` map | Add at least one tunnel to the config |

@@ -86,6 +86,9 @@ pub fn tool_definitions() -> Vec<Value> {
         serde_json::json!({
             "name": "create_tunnel",
             "description": "Open a tunnel to a locally running service and get a public URL. \
+                Use this when the user or task needs a public URL for a service running \
+                locally — webhook testing, sharing a dev server, or letting another agent \
+                or device reach localhost. \
                 Spawns the rustunnel CLI as a subprocess — the tunnel stays open until \
                 close_tunnel is called or the MCP server exits.\n\
                 \n\
@@ -122,8 +125,9 @@ pub fn tool_definitions() -> Vec<Value> {
         serde_json::json!({
             "name": "list_tunnels",
             "description": "List all tunnels currently open on this server. Returns the public \
-                URL, protocol, and traffic count for each active tunnel. Use this to check \
-                whether your tunnel is still running or to find the public URL of an existing tunnel.",
+                URL, protocol, and traffic count for each active tunnel. Use this when you \
+                need to check whether a tunnel is still running, recover the public URL of \
+                an existing tunnel, or find a tunnel_id to pass to close_tunnel.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -134,7 +138,9 @@ pub fn tool_definitions() -> Vec<Value> {
         serde_json::json!({
             "name": "close_tunnel",
             "description": "Force-close a specific tunnel by its ID. The public URL stops \
-                working immediately. Use list_tunnels to find the tunnel_id.",
+                working immediately. Use this when a tunnel is no longer needed or public \
+                access must be revoked right away — e.g. after a webhook test or demo \
+                finishes. Use list_tunnels to find the tunnel_id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -147,9 +153,10 @@ pub fn tool_definitions() -> Vec<Value> {
         serde_json::json!({
             "name": "get_connection_info",
             "description": "Get the CLI command (and, for load-balanced tunnels, a config file) \
-                needed to create a tunnel manually — without spawning anything. Use this when the \
-                MCP server cannot spawn subprocesses (e.g. cloud sandbox) or when you prefer to \
-                run the client yourself. Accepts the same arguments as create_tunnel.",
+                needed to create a tunnel manually — without spawning anything. Use this when \
+                the MCP server cannot spawn subprocesses (e.g. cloud sandbox), when the tunnel \
+                must outlive the MCP server, or when you prefer to run the client yourself. \
+                Accepts the same arguments as create_tunnel.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -172,14 +179,16 @@ pub fn tool_definitions() -> Vec<Value> {
         serde_json::json!({
             "name": "list_regions",
             "description": "List available tunnel server regions with their IDs, names, \
-                and locations. Use this to pick a specific region for create_tunnel. \
+                and locations. Use this when you need to pick a specific `region` for \
+                create_tunnel or check which edge locations exist. \
                 No authentication required.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         serde_json::json!({
             "name": "get_tunnel_history",
             "description": "Retrieve the history of past tunnels, including their duration and \
-                which token opened them. Useful for auditing activity or debugging dropped tunnels.",
+                which token opened them. Use this when auditing past tunnel activity or \
+                debugging why a tunnel dropped or is no longer listed by list_tunnels.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

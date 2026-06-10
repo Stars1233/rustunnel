@@ -113,7 +113,11 @@ pub fn print_request(method: &str, path: &str, status: u16, duration_ms: u64) {
 }
 
 /// Create a spinner for an in-progress operation (e.g. connecting).
+/// Hidden in `--json` mode so output stays machine-readable.
 pub fn spinner(msg: &str) -> ProgressBar {
+    if crate::output::json_mode() {
+        return ProgressBar::hidden();
+    }
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.cyan} {msg}")
