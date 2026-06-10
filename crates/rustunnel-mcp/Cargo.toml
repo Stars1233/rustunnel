@@ -8,7 +8,7 @@ categories = ["network-programming", "command-line-utilities", "development-tool
 license = "AGPL-3.0"
 repository = "https://github.com/joaoh82/rustunnel"
 homepage = "https://rustunnel.com"
-readme = "../../README.md"
+readme = "README.md"
 
 [[bin]]
 name = "rustunnel-mcp"

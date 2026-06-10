@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.joaoh82/rustunnel",
+  "title": "rustunnel",
+  "description": "Expose any localhost service so an AI agent can reach it — public HTTPS/TCP/UDP URLs via six MCP tools. Open source, self-hostable.",
+  "repository": {
+    "url": "https://github.com/joaoh82/rustunnel",
+    "source": "github"
+  },
+  "websiteUrl": "https://rustunnel.com",
+  "version": "0.8.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "rustunnel-mcp",
+      "version": "0.8.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--server",
+          "value": "eu.edge.rustunnel.com:4040",
+          "description": "rustunnel control-plane address (your own host:4040 when self-hosting)"
+        },
+        {
+          "type": "named",
+          "name": "--api",
+          "value": "https://eu.edge.rustunnel.com:8443",
+          "description": "rustunnel dashboard REST API base URL"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "RUSTUNNEL_TOKEN",
+          "description": "API token from rustunnel.com → Dashboard → API Keys (or your self-hosted admin token)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
