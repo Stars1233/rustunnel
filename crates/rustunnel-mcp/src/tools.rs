@@ -71,10 +71,14 @@ fn resolve_token(args: &Value, state: &State) -> Option<String> {
 ///    covers bundles and tarball installs without any configuration.
 /// 3. Plain `rustunnel`, resolved through `PATH` (the historical behaviour).
 fn resolve_cli_path() -> PathBuf {
-    if let Ok(p) = std::env::var("RUSTUNNEL_CLI") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p);
-        }
+    resolve_cli_path_from(std::env::var("RUSTUNNEL_CLI").ok().as_deref())
+}
+
+/// Pure resolution logic, split out so it can be unit-tested without
+/// mutating process environment (env mutation races with parallel tests).
+fn resolve_cli_path_from(env_override: Option<&str>) -> PathBuf {
+    if let Some(p) = env_override.map(str::trim).filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -928,15 +932,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cli_path_prefers_env_var() {
-        // Serialize env mutation: cargo runs tests in parallel within one
-        // process, but no other test in this crate touches RUSTUNNEL_CLI.
-        std::env::set_var("RUSTUNNEL_CLI", "/opt/custom/rustunnel");
-        assert_eq!(resolve_cli_path(), PathBuf::from("/opt/custom/rustunnel"));
-        std::env::set_var("RUSTUNNEL_CLI", "   ");
-        // Whitespace-only is treated as unset → sibling lookup or PATH name.
-        let p = resolve_cli_path();
-        assert!(p == std::path::Path::new("rustunnel") || p.ends_with("rustunnel"));
-        std::env::remove_var("RUSTUNNEL_CLI");
+    fn resolve_cli_path_prefers_env_override() {
+        assert_eq!(
+            resolve_cli_path_from(Some("/opt/custom/rustunnel")),
+            PathBuf::from("/opt/custom/rustunnel")
+        );
+        // Surrounding whitespace is trimmed off the override.
+        assert_eq!(
+            resolve_cli_path_from(Some("  /opt/custom/rustunnel ")),
+            PathBuf::from("/opt/custom/rustunnel")
+        );
+        // Whitespace-only / unset → sibling lookup or bare PATH name.
+        for empty in [Some("   "), None] {
+            let p = resolve_cli_path_from(empty);
+            let name = if cfg!(windows) {
+                "rustunnel.exe"
+            } else {
+                "rustunnel"
+            };
+            assert!(p.ends_with(name));
+        }
     }
 }

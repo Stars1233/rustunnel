@@ -19,6 +19,10 @@ TARGET=$2
 ARCHIVE=$3
 OUT_DIR=$4
 
+# Resolve to an absolute path up front — later steps cd into temp dirs.
+mkdir -p "$OUT_DIR"
+OUT_DIR=$(cd "$OUT_DIR" && pwd)
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TEMPLATE="$SCRIPT_DIR/manifest.template.json"
 
@@ -31,7 +35,7 @@ esac
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/extract" "$WORK/bundle/server" "$OUT_DIR"
+mkdir -p "$WORK/extract" "$WORK/bundle/server"
 
 case "$ARCHIVE" in
   *.zip)    unzip -q "$ARCHIVE" -d "$WORK/extract" ;;
@@ -59,7 +63,7 @@ jq empty "$WORK/bundle/manifest.json"
 
 BUNDLE="$OUT_DIR/rustunnel-mcp-$TARGET.mcpb"
 rm -f "$BUNDLE"
-(cd "$WORK/bundle" && zip -qr "$(cd "$OUT_DIR" && pwd)/$(basename "$BUNDLE")" .)
+(cd "$WORK/bundle" && zip -qr "$BUNDLE" .)
 
 (cd "$OUT_DIR" && { sha256sum "$(basename "$BUNDLE")" 2>/dev/null \
   || shasum -a 256 "$(basename "$BUNDLE")"; } > "$(basename "$BUNDLE").sha256")

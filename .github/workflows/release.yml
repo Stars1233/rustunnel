@@ -186,6 +186,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Pattern also matches release-server-* / release-mcpb on re-runs;
+      # harmless — the loop below selects exact filenames.
       - name: Download client/MCP artifacts
         uses: actions/download-artifact@v4
         with:
@@ -199,13 +201,19 @@ jobs:
           mkdir -p mcpb-out
           # One bundle per OS/arch the registry should offer. linux x86_64
           # uses the musl build (fully static — runs on any distro).
+          # (No aarch64-musl build exists in the matrix, so the linux arm64
+          # bundle is glibc-based and won't run on Alpine ARM hosts.)
           for target in \
             aarch64-apple-darwin \
             x86_64-apple-darwin \
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-gnu \
             x86_64-pc-windows-msvc; do
-            archive=$(ls archives/rustunnel-v${VERSION}-${target}.tar.gz archives/rustunnel-v${VERSION}-${target}.zip 2>/dev/null | head -1)
+            archive=""
+            for ext in tar.gz zip; do
+              f="archives/rustunnel-v${VERSION}-${target}.${ext}"
+              if [[ -f "$f" ]]; then archive=$f; break; fi
+            done
             if [[ -z "$archive" ]]; then
               echo "::error::no archive found for ${target}"
               exit 1
