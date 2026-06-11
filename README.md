@@ -12,6 +12,12 @@ Expose local services through a public server over encrypted WebSocket connectio
 
 You can self-host or use our managed service.
 
+**Using an AI agent?** rustunnel ships an [MCP server](https://rustunnel.com/docs/guides/mcp-server) — one-click setup for Cursor (then add your [API token](https://rustunnel.com)):
+
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=rustunnel&config=eyJjb21tYW5kIjoicnVzdHVubmVsLW1jcCIsImFyZ3MiOlsiLS1zZXJ2ZXIiLCJldS5lZGdlLnJ1c3R1bm5lbC5jb206NDA0MCIsIi0tYXBpIiwiaHR0cHM6Ly9ldS5lZGdlLnJ1c3R1bm5lbC5jb206ODQ0MyJdLCJlbnYiOnsiUlVTVFVOTkVMX1RPS0VOIjoiWU9VUl9UT0tFTiJ9fQ==)
+
+For Claude Code, Claude Desktop, Windsurf, and others, see the [agent integration guide](https://rustunnel.com/docs/guides/agent-integration) or the agent manual at [rustunnel.com/agents.md](https://rustunnel.com/agents.md).
+
 ---
 
 ## Table of Contents
