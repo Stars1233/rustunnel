@@ -1,0 +1,79 @@
+# Builds the rustunnel-mcp Docker image (linux/amd64 + linux/arm64) from the
+# release binaries and pushes it to ghcr.io/joaoh82/rustunnel-mcp. Called by
+# release.yml after each release; dispatchable from the Actions tab to build
+# an image for an existing release.
+#
+# One-time setup: after the first push, make the ghcr package PUBLIC
+# (github.com → profile → Packages → rustunnel-mcp → settings → visibility) —
+# the MCP registry and Glama both need to pull it anonymously.
+name: Publish MCP Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build from (e.g. v0.8.1)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  publish-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Compute version
+        id: meta
+        run: |
+          TAG="${{ inputs.tag }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download linux release binaries
+        env:
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ctx/binaries/amd64 ctx/binaries/arm64
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "rustunnel-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            --pattern "rustunnel-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+          tar -xzf "rustunnel-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C ctx/binaries/amd64
+          tar -xzf "rustunnel-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz" -C ctx/binaries/arm64
+          cp deploy/docker/Dockerfile.mcp ctx/Dockerfile
+          ls -lR ctx/
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/joaoh82/rustunnel-mcp:${{ steps.meta.outputs.version }}
+            ghcr.io/joaoh82/rustunnel-mcp:latest

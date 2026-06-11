@@ -284,9 +284,21 @@ jobs:
             "joaoh82/rustunnel" \
             "joaoh82/homebrew-rustunnel"
 
+  publish-mcp-image:
+    name: Publish MCP Docker image
+    needs: [publish]
+    if: ${{ !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/publish-mcp-image.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      packages: write
+
   publish-mcp-registry:
     name: Publish to MCP Registry
-    needs: [publish]
+    # Image first: the registry's oci ownership check pulls the image manifest.
+    needs: [publish, publish-mcp-image]
     # Skip pre-releases, same as the Homebrew update.
     if: ${{ !contains(github.ref_name, '-') }}
     uses: ./.github/workflows/publish-mcp.yml
