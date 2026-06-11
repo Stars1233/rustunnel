@@ -51,6 +51,26 @@ extract "$WORK/dl/rustunnel-v${VERSION}-x86_64-unknown-linux-musl.tar.gz" "$WORK
 extract "$WORK/dl/rustunnel-v${VERSION}-x86_64-pc-windows-msvc.zip"       "$WORK/bundle/server/win32"  ".exe"
 
 sed "s/__VERSION__/$VERSION/g" "$TEMPLATE" > "$WORK/bundle/manifest.json"
+
+# Embed the live tool definitions (name/description/inputSchema) introspected
+# from the bundled binary for this host OS — Smithery scores listings on
+# tool-definition quality, and name+description-only entries fail their
+# deploy validation outright.
+case "$(uname -s)" in
+  Darwin) HOST_BIN="$WORK/bundle/server/darwin/rustunnel-mcp" ;;
+  Linux)  HOST_BIN="$WORK/bundle/server/linux/rustunnel-mcp" ;;
+  *)      HOST_BIN="" ;;
+esac
+if [[ -n "$HOST_BIN" ]]; then
+  python3 "$SCRIPT_DIR/introspect-tools.py" "$HOST_BIN" > "$WORK/tools.json"
+  jq --slurpfile tools "$WORK/tools.json" '.tools = $tools[0]' \
+    "$WORK/bundle/manifest.json" > "$WORK/manifest.tmp"
+  mv "$WORK/manifest.tmp" "$WORK/bundle/manifest.json"
+  echo "embedded $(jq length "$WORK/tools.json") tool definitions"
+else
+  echo "warning: unsupported host OS — manifest ships without tool definitions" >&2
+fi
+
 jq empty "$WORK/bundle/manifest.json"
 
 BUNDLE="$OUT_DIR/rustunnel-mcp-universal.mcpb"
