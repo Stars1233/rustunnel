@@ -29,10 +29,11 @@ jobs:
       packages: write
 
     steps:
+      # Deliberately NOT pinned to inputs.tag: the Dockerfile and this
+      # workflow are tooling, not release content — older tags predate them.
+      # Only the binaries (gh release download below) come from the tag.
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
 
       - name: Compute version
         id: meta
