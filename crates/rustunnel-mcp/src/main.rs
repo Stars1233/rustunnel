@@ -57,16 +57,20 @@ use tunnel_manager::TunnelManager;
 struct Cli {
     /// Control-plane address passed to the rustunnel CLI when spawning tunnels.
     /// Format: host:port  (e.g. tunnel.example.com:4040)
-    #[arg(long, default_value = "localhost:4040")]
+    /// Falls back to the RUSTUNNEL_SERVER env var — useful on platforms that
+    /// configure servers via environment only (e.g. container hosts).
+    #[arg(long, env = "RUSTUNNEL_SERVER", default_value = "localhost:4040")]
     server: String,
 
     /// Dashboard REST API base URL used to query tunnel state and history.
     /// (e.g. http://localhost:4041 or https://tunnel.example.com:8443)
-    #[arg(long, default_value = "http://localhost:4041")]
+    /// Falls back to the RUSTUNNEL_API env var.
+    #[arg(long, env = "RUSTUNNEL_API", default_value = "http://localhost:4041")]
     api: String,
 
     /// Skip TLS certificate verification (local dev / self-signed certs only).
-    #[arg(long)]
+    /// Falls back to the RUSTUNNEL_INSECURE env var (any non-empty value).
+    #[arg(long, env = "RUSTUNNEL_INSECURE")]
     insecure: bool,
 }
 
