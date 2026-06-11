@@ -1,0 +1,27 @@
+# Image for rustunnel-mcp — the MCP server plus the rustunnel CLI it spawns.
+# Built by .github/workflows/publish-mcp-image.yml from the release binaries
+# (no compilation here): the build context contains binaries/<arch>/ dirs
+# with the linux-gnu builds for amd64 and arm64.
+#
+# Used by MCP clients that run servers in containers (e.g. the Glama
+# inspector) and listed as an `oci` package in the official MCP registry.
+# Note: to tunnel a service running on the HOST, pass `local_host` as
+# `host.docker.internal` (macOS/Windows) or run with `--network host` (Linux).
+FROM debian:stable-slim
+ARG TARGETARCH
+
+# CA roots for the TLS connections to the control plane and REST API.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY binaries/${TARGETARCH}/rustunnel /usr/local/bin/rustunnel
+COPY binaries/${TARGETARCH}/rustunnel-mcp /usr/local/bin/rustunnel-mcp
+
+# Ownership label the official MCP registry checks for oci packages.
+LABEL io.modelcontextprotocol.server.name="io.github.joaoh82/rustunnel"
+LABEL org.opencontainers.image.source="https://github.com/joaoh82/rustunnel"
+LABEL org.opencontainers.image.description="rustunnel MCP server — give AI agents public HTTPS/TCP/UDP URLs for any localhost service"
+LABEL org.opencontainers.image.licenses="AGPL-3.0"
+
+ENTRYPOINT ["/usr/local/bin/rustunnel-mcp"]
