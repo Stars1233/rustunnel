@@ -1,0 +1,5 @@
+{
+  "name": "rustunnel",
+  "description": "Expose any localhost service so an AI agent can reach it — public HTTPS/TCP/UDP URLs via six MCP tools. Open source, self-hostable.",
+  "homepage": "https://rustunnel.com"
+}
