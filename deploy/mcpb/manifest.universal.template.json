@@ -76,9 +76,9 @@
     "token": {
       "type": "string",
       "title": "API token",
-      "description": "Create one free at rustunnel.com → Dashboard → API Keys (or use your self-hosted admin token).",
+      "description": "Create one free at rustunnel.com → Dashboard → API Keys (or use your self-hosted admin token). Optional at startup — the server boots and lists tools without it; creating tunnels requires it.",
       "sensitive": true,
-      "required": true
+      "required": false
     }
   },
   "compatibility": {
