@@ -64,14 +64,14 @@
       "title": "Tunnel server address",
       "description": "Control-plane address. Hosted: eu.edge.rustunnel.com:4040 (or us/ap). Self-hosted: your-host:4040.",
       "default": "eu.edge.rustunnel.com:4040",
-      "required": true
+      "required": false
     },
     "api_url": {
       "type": "string",
       "title": "Dashboard API URL",
       "description": "REST API base URL. Hosted: https://eu.edge.rustunnel.com:8443 (match the server region). Self-hosted: https://your-host:8443.",
       "default": "https://eu.edge.rustunnel.com:8443",
-      "required": true
+      "required": false
     },
     "token": {
       "type": "string",
