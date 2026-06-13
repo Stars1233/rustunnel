@@ -1,0 +1,99 @@
+# Builds the rustunnel-server Docker image (linux/amd64 + linux/arm64) from
+# deploy/Dockerfile and pushes it to ghcr.io/joaoh82/rustunnel-server. Called by
+# release.yml on stable tags; dispatchable from the Actions tab to (re)build an
+# image for an existing tag — use this once to seed the package, then make it
+# PUBLIC (github.com → profile → Packages → rustunnel-server → settings →
+# visibility) so `docker pull` works without auth.
+#
+# Note: the arm64 layer is built under QEMU emulation (the Rust server + the
+# Next.js dashboard both compile inside the image), so a cold run is slow; the
+# buildx GHA cache keeps subsequent runs reasonable.
+name: Publish server Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build from (e.g. v0.8.1)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  publish-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # Build from the tagged source so the image contains that version's code.
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          # Always publish the immutable version tag. Only move :latest for
+          # stable releases — pre-release tags carry a hyphen (e.g. v1.0.0-rc1).
+          TAGS="ghcr.io/joaoh82/rustunnel-server:${VERSION}"
+          if [[ "$TAG" != *-* ]]; then
+            TAGS="${TAGS}"$'\n'"ghcr.io/joaoh82/rustunnel-server:latest"
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "revision=$(git rev-parse HEAD)"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ steps.meta.outputs.revision }}
+          # Re-asserted here (not only in the Dockerfile) so the labels — above
+          # all image.source, which links the package to this repo and renders
+          # the README on the package page — are present even when (re)building
+          # an older tag whose Dockerfile predates them.
+          labels: |
+            org.opencontainers.image.source=https://github.com/joaoh82/rustunnel
+            org.opencontainers.image.url=https://github.com/joaoh82/rustunnel
+            org.opencontainers.image.documentation=https://github.com/joaoh82/rustunnel/blob/main/README.md
+            org.opencontainers.image.title=rustunnel-server
+            org.opencontainers.image.description=rustunnel — self-hosted secure tunnel server (HTTP/TCP/UDP reverse proxy with TLS, live dashboard, and Prometheus metrics)
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -295,6 +295,18 @@ jobs:
       contents: read
       packages: write
 
+  publish-server-image:
+    name: Publish server Docker image
+    needs: [publish]
+    # Skip pre-releases (tags with a hyphen, e.g. v1.0.0-rc1) — stable only.
+    if: ${{ !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/release-docker.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      packages: write
+
   publish-mcp-registry:
     name: Publish to MCP Registry
     # Image first: the registry's oci ownership check pulls the image manifest.
