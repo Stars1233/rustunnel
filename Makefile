@@ -1,5 +1,5 @@
 .PHONY: build build-full test fmt lint check install-hooks release release-server release-client \
-        release-mcp docker-build docker-run docker-run-monitoring docker-stop docker-logs \
+        release-mcp docker-build docker-push docker-run docker-run-monitoring docker-stop docker-logs \
         deploy deploy-client update-server db-start db-stop dev-setup clean help
 
 # ── configuration ─────────────────────────────────────────────────────────────
@@ -8,6 +8,7 @@ BINARY_SERVER := rustunnel-server
 BINARY_CLIENT := rustunnel
 BINARY_MCP    := rustunnel-mcp
 IMAGE         := rustunnel-server
+REGISTRY_IMAGE := ghcr.io/joaoh82/rustunnel-server
 TAG           ?= latest
 
 # ── development ───────────────────────────────────────────────────────────────
@@ -100,6 +101,14 @@ release-mcp:
 ## docker-build  Build the Docker image (deploy/Dockerfile).
 docker-build:
 	docker build -f deploy/Dockerfile -t $(IMAGE):$(TAG) .
+
+## docker-push  Build and push a multi-arch image (amd64+arm64) to GHCR. Needs buildx + `docker login ghcr.io`.
+docker-push:
+	docker buildx build -f deploy/Dockerfile \
+	    --platform linux/amd64,linux/arm64 \
+	    --label org.opencontainers.image.source=https://github.com/joaoh82/rustunnel \
+	    --tag $(REGISTRY_IMAGE):$(TAG) \
+	    --push .
 
 ## docker-run   Start the server container (requires deploy/server.toml).
 docker-run:

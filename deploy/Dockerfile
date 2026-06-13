@@ -64,6 +64,20 @@ RUN touch crates/rustunnel-protocol/src/lib.rs \
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
+# OCI image metadata. `image.source` links the GHCR package to this repo so the
+# package overview page renders the repo README; `version`/`revision` are filled
+# at build time via build-args (default to dev values for plain local builds).
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/joaoh82/rustunnel" \
+      org.opencontainers.image.url="https://github.com/joaoh82/rustunnel" \
+      org.opencontainers.image.documentation="https://github.com/joaoh82/rustunnel/blob/main/README.md" \
+      org.opencontainers.image.title="rustunnel-server" \
+      org.opencontainers.image.description="rustunnel — self-hosted secure tunnel server (HTTP/TCP/UDP reverse proxy with TLS, live dashboard, and Prometheus metrics)" \
+      org.opencontainers.image.licenses="AGPL-3.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

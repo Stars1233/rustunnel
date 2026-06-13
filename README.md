@@ -651,11 +651,30 @@ A full Docker guide covering both local development (self-signed cert) and
 production VPS (Let's Encrypt) is available in
 [**docs/docker-deployment.md**](docs/docker-deployment.md).
 
-### Quick reference
+### Pull the published image
+
+Multi-arch images (`linux/amd64` + `linux/arm64`) are published to GitHub
+Container Registry on every stable release — no build required:
 
 ```bash
-# Build the image (includes Next.js dashboard + Rust server)
+# Latest stable, or pin a version (e.g. :0.8.1)
+docker pull ghcr.io/joaoh82/rustunnel-server:latest
+
+# Run it with your server config mounted at /etc/rustunnel/server.toml
+docker run --rm \
+  -p 80:80 -p 443:443 -p 4040:4040 -p 8443:8443 \
+  -v "$PWD/deploy/server.toml:/etc/rustunnel/server.toml:ro" \
+  ghcr.io/joaoh82/rustunnel-server:latest
+```
+
+### Quick reference (build from source)
+
+```bash
+# Build the image locally (includes Next.js dashboard + Rust server)
 make docker-build
+
+# Build and push a multi-arch image to GHCR (maintainers; needs buildx + ghcr login)
+make docker-push
 
 # Local development (self-signed cert, no auth required)
 docker compose -f deploy/docker-compose.local.yml up
