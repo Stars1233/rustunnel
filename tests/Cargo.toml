@@ -26,6 +26,8 @@ serde_json         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile           = { workspace = true }
+hmac               = "0.12"
+sha1               = "0.10"
 
 [[test]]
 name = "auth"
@@ -82,3 +84,7 @@ path = "integration/group_events_sse.rs"
 [[test]]
 name = "dashboard_scope"
 path = "integration/dashboard_scope.rs"
+
+[[test]]
+name = "webhook_fidelity"
+path = "integration/webhook_fidelity.rs"

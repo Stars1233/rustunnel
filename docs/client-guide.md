@@ -311,6 +311,23 @@ rustunnel http 3000 --no-reconnect
 rustunnel http 3000 --server tunnel.example.com:9000 --token rt_live_abc123
 ```
 
+**Receiving webhooks (Twilio, Stripe, GitHub, …):**
+
+HTTP tunnels are safe for HMAC-signed webhooks:
+
+- The request body is forwarded **byte-for-byte** — the proxy never parses or
+  re-serializes it, so signatures computed over the raw payload stay valid.
+- Every proxied request carries `X-Forwarded-For` (caller IP, appended to any
+  existing chain), `X-Forwarded-Proto` (`http` or `https`) and
+  `X-Forwarded-Host` (the public tunnel host). Frameworks use these to
+  reconstruct the public URL, which signed-webhook validation depends on —
+  no manual base-URL override needed.
+- Prefer configuring providers with the **`https://` tunnel URL**. `http://`
+  URLs also work when the server runs with `plain_http_mode = "proxy"`
+  (the default on rustunnel.com edges); on `redirect` servers an `http://`
+  webhook URL gets a 308 redirect, which many providers either refuse to
+  follow or re-sign against the target URL — breaking signature validation.
+
 ---
 
 ### `tcp` — TCP tunnel

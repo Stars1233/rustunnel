@@ -346,6 +346,8 @@ impl TestServer {
                 control_port,
                 dashboard_port,
                 dashboard_origin: "http://localhost:3000".to_string(),
+                // Exercise the ngrok-parity plain-HTTP proxy path in tests.
+                plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
             },
             tls: TlsSection {
                 cert_path: cert_path.clone(),
@@ -450,6 +452,7 @@ impl TestServer {
             let limits = rustunnel_server::edge::HttpEdgeConfig {
                 rate_limit_rps: config.limits.rate_limit_rps,
                 request_body_max_bytes: config.limits.request_body_max_bytes,
+                plain_http_mode: config.server.plain_http_mode,
             };
             async move {
                 let _ = rustunnel_server::edge::run_http_edge(
