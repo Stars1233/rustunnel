@@ -46,6 +46,7 @@ async fn start_with_pretend_version(pretend_version: &str) -> TestServer {
         load_balancing_enabled: true,
         alert_webhook_url: None,
         server_version_override: Some(pretend_version.to_string()),
+        plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
     })
     .await
 }

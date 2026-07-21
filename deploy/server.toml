@@ -10,7 +10,7 @@
 #   *.edge.rustunnel.com  →  <server public IP>
 domain = "edge.rustunnel.com"
 
-# Port 80  — HTTP edge (see plain_http_mode below; also handles ACME HTTP-01 challenges)
+# Port 80  — HTTP edge (see plain_http_mode below)
 # Port 443 — HTTPS edge (TLS-terminated tunnel ingress)
 # Binding to ports < 1024 requires CAP_NET_BIND_SERVICE (granted in the
 # systemd unit via AmbientCapabilities=CAP_NET_BIND_SERVICE).

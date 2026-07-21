@@ -982,6 +982,13 @@ impl TunnelCore {
         self.dispatch_member(&group)
     }
 
+    /// Side-effect-free existence check for an HTTP route. Unlike
+    /// `resolve_http` this does not dispatch a member (no request-count
+    /// increment, no random pick) — use it for gating decisions.
+    pub fn has_http_route(&self, subdomain: &str) -> bool {
+        self.http_routes.contains_key(subdomain)
+    }
+
     /// Look up the tunnel and its session's control channel by TCP port.
     pub fn resolve_tcp(&self, port: u16) -> Option<(TunnelInfo, mpsc::Sender<ControlMessage>)> {
         let group = self.tcp_routes.get(&port)?.clone();

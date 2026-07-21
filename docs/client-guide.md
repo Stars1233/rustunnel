@@ -321,7 +321,11 @@ HTTP tunnels are safe for HMAC-signed webhooks:
   existing chain), `X-Forwarded-Proto` (`http` or `https`) and
   `X-Forwarded-Host` (the public tunnel host). Frameworks use these to
   reconstruct the public URL, which signed-webhook validation depends on —
-  no manual base-URL override needed.
+  no manual base-URL override needed. `X-Forwarded-Proto` and
+  `X-Forwarded-Host` are set authoritatively by the edge; for
+  `X-Forwarded-For`, only the **rightmost** entry is edge-verified — earlier
+  entries are supplied by the caller and must not be trusted for IP
+  allowlists or logging.
 - Prefer configuring providers with the **`https://` tunnel URL**. `http://`
   URLs also work when the server runs with `plain_http_mode = "proxy"`
   (the default on rustunnel.com edges); on `redirect` servers an `http://`

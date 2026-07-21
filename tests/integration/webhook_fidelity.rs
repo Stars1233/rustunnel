@@ -361,6 +361,60 @@ async fn signed_webhook_survives_plain_http_edge() {
     assert_eq!(backend_sig, signature);
 }
 
+/// In `redirect` mode (the shipped-config default), even a host that
+/// resolves to a registered tunnel must get a 308 on the plain-HTTP port —
+/// never be proxied.
+#[tokio::test]
+async fn redirect_mode_never_proxies_registered_tunnels() {
+    init_tracing();
+
+    let tcp_low = alloc_tcp_port_range(10);
+    let udp_low = alloc_tcp_port_range(10);
+    let server = TestServer::start_with_opts(TestServerOpts {
+        control_port: free_port(),
+        http_port: free_port(),
+        https_port: free_port(),
+        dashboard_port: free_port(),
+        tcp_port_range: [tcp_low, tcp_low + 9],
+        udp_port_range: [udp_low, udp_low + 9],
+        require_auth: true,
+        admin_token: "integration-test-token".to_string(),
+        load_balancing_enabled: false,
+        alert_webhook_url: None,
+        server_version_override: None,
+        plain_http_mode: rustunnel_server::edge::PlainHttpMode::Redirect,
+    })
+    .await;
+
+    let mut client = TestClient::connect(&server).await.expect("client auth");
+    let (_, subdomain, _) = client
+        .register_http_tunnel(Some("redirmode"))
+        .await
+        .expect("tunnel registration");
+    let host = format!("{subdomain}.{}", server.domain);
+
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = http
+        .post(format!("http://127.0.0.1:{}/hook", server.http_port))
+        .header("Host", &host)
+        .body("a=1")
+        .send()
+        .await
+        .expect("POST to registered tunnel host in redirect mode");
+
+    assert_eq!(resp.status(), 308);
+    assert_eq!(
+        resp.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .expect("Location header"),
+        &format!("https://{host}:{}/hook", server.https_port)
+    );
+}
+
 /// Plain-HTTP requests that do not resolve to a tunnel must get a 308
 /// (method- and body-preserving), never a 301.
 #[tokio::test]

@@ -193,13 +193,19 @@ async fn plain_http_request(
     peer: SocketAddr,
     ctx: ProxyCtx,
 ) -> Response<BoxBody> {
+    // Rate-limit before any routing work so the gate probe below cannot be
+    // driven unthrottled (and can't serve as a subdomain-existence oracle).
+    if !ctx.core.ip_limiter.check(peer.ip()) {
+        return err_response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded");
+    }
+
     if ctx.plain_http_mode == PlainHttpMode::Proxy {
         let resolvable = req
             .headers()
             .get(HOST)
             .and_then(|v| v.to_str().ok())
             .and_then(|h| extract_subdomain(h, &ctx.domain))
-            .map(|sub| ctx.core.resolve_http(&sub).is_some())
+            .map(|sub| ctx.core.has_http_route(&sub))
             .unwrap_or(false);
         if resolvable {
             return proxy_request(req, peer, ctx, ForwardScheme::Http).await;
@@ -218,7 +224,13 @@ fn redirect_to_https<B>(req: Request<B>, domain: &str, https_port: u16) -> Respo
         .unwrap_or(domain);
     let host = sanitize_host(raw_host).unwrap_or_else(|| domain.to_string());
     // Strip any incoming port; the redirect target is the HTTPS listener.
-    let name = host.split(':').next().unwrap_or(&host);
+    let mut name = host.split(':').next().unwrap_or(&host);
+    // Only redirect within our own domain — an arbitrary Host here would
+    // make this an open redirect (and, with 308, forward method + body to
+    // an attacker-chosen destination).
+    if name != domain && !name.ends_with(&format!(".{domain}")) {
+        name = domain;
+    }
     let authority = if https_port == 443 {
         name.to_string()
     } else {
@@ -302,6 +314,12 @@ async fn run_https_proxy(
             let svc = service_fn(move |req: Request<Incoming>| {
                 let ctx = ctx.clone();
                 async move {
+                    if !ctx.core.ip_limiter.check(peer.ip()) {
+                        return Ok::<_, Infallible>(err_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "Rate limit exceeded",
+                        ));
+                    }
                     Ok::<_, Infallible>(proxy_request(req, peer, ctx, ForwardScheme::Https).await)
                 }
             });
@@ -326,10 +344,9 @@ async fn proxy_request(
 ) -> Response<BoxBody> {
     let start = Instant::now();
 
-    // ── 0. IP rate limit ──────────────────────────────────────────────────
-    if !ctx.core.ip_limiter.check(peer.ip()) {
-        return err_response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded");
-    }
+    // IP rate limiting already happened at the listener entry points
+    // (`plain_http_request` / the HTTPS service closure) — checking the
+    // sliding window again here would double-count each request.
 
     // ── 1. Extract subdomain ──────────────────────────────────────────────
     let host = match req.headers().get(HOST).and_then(|v| v.to_str().ok()) {
@@ -728,10 +745,14 @@ fn remove_hop_by_hop(headers: &mut hyper::HeaderMap) {
 
 /// Add the standard reverse-proxy forwarding headers.
 ///
-/// `X-Forwarded-For` appends the peer IP to any inbound value (standard chain
-/// behaviour); `X-Forwarded-Proto` and `X-Forwarded-Host` are overwritten —
-/// this edge is the trust boundary, so client-supplied values must not
-/// masquerade as ours.
+/// `X-Forwarded-For` appends the peer IP to any inbound value (standard
+/// chain behaviour, matching ngrok). Because this edge faces the internet
+/// directly, earlier entries in the chain are client-supplied and MUST NOT
+/// be trusted — backends should read the rightmost entry only. IPv6 peers
+/// are emitted unbracketed (nginx convention).
+///
+/// `X-Forwarded-Proto` and `X-Forwarded-Host` are overwritten — the edge is
+/// authoritative for both, so spoofed inbound values never reach the tunnel.
 fn set_forwarded_headers(
     headers: &mut hyper::HeaderMap,
     peer: SocketAddr,
@@ -853,6 +874,22 @@ mod tests {
         assert_eq!(
             resp.headers().get("Location").unwrap(),
             "https://myapp.tunnel.example.com/api/webhooks/sms/inbound?x=1"
+        );
+    }
+
+    #[test]
+    fn redirect_never_leaves_our_domain() {
+        // A Host outside the configured domain must not become an open
+        // redirect target — fall back to the bare domain instead.
+        let req = Request::builder()
+            .uri("/steal")
+            .header("host", "evil.example.net")
+            .body(())
+            .unwrap();
+        let resp = redirect_to_https(req, "tunnel.example.com", 443);
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            "https://tunnel.example.com/steal"
         );
     }
 
