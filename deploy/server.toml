@@ -10,12 +10,20 @@
 #   *.edge.rustunnel.com  →  <server public IP>
 domain = "edge.rustunnel.com"
 
-# Port 80  — HTTP edge (redirects to HTTPS; also handles ACME HTTP-01 challenges)
+# Port 80  — HTTP edge (see plain_http_mode below)
 # Port 443 — HTTPS edge (TLS-terminated tunnel ingress)
 # Binding to ports < 1024 requires CAP_NET_BIND_SERVICE (granted in the
 # systemd unit via AmbientCapabilities=CAP_NET_BIND_SERVICE).
 http_port  = 80
 https_port = 443
+
+# Plain-HTTP (port 80) behaviour:
+#   "proxy"    — requests whose subdomain resolves to a tunnel are proxied
+#                directly with X-Forwarded-Proto: http (ngrok parity; required
+#                for HMAC-signed webhooks configured with an http:// URL,
+#                e.g. Twilio). Everything else 308-redirects to HTTPS.
+#   "redirect" — every request 308-redirects to HTTPS (default).
+plain_http_mode = "proxy"
 
 # Clients connect here over a TLS WebSocket (wss://).
 control_port = 4040

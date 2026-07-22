@@ -1,8 +1,20 @@
 //! HTTP / HTTPS edge proxy.
 //!
-//! * Port 80  — plain HTTP, every request → 301 redirect to HTTPS.
+//! * Port 80  — plain HTTP. Behaviour depends on `plain_http_mode`:
+//!   - `proxy` (recommended): requests whose `Host` subdomain resolves to a
+//!     tunnel are proxied directly (like the HTTPS edge, with
+//!     `X-Forwarded-Proto: http`), so signed webhooks configured with an
+//!     `http://` URL work without a redirect hop. Unresolvable hosts get a
+//!     308 redirect to HTTPS.
+//!   - `redirect`: every request → 308 redirect to HTTPS (method-preserving;
+//!     previously 301, which turned followed POSTs into GETs).
 //! * Port 443 — TLS-terminated; requests are proxied through the tunnel
 //!   identified by the `Host` subdomain.
+//!
+//! Both proxy paths add `X-Forwarded-For`, `X-Forwarded-Proto` and
+//! `X-Forwarded-Host` before forwarding, and never re-serialize the request
+//! body — bytes reach the local service exactly as sent (required for
+//! HMAC-signed webhooks, e.g. Twilio).
 //!
 //! Proxy flow for a normal request
 //! ────────────────────────────────
@@ -64,11 +76,41 @@ fn empty() -> BoxBody {
 
 // ── shared context ────────────────────────────────────────────────────────────
 
+/// Behaviour of the plain-HTTP (port 80) listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlainHttpMode {
+    /// 308 redirect every request to HTTPS (legacy behaviour, minus the
+    /// method-dropping 301).
+    #[default]
+    Redirect,
+    /// Proxy requests whose subdomain resolves to a tunnel; redirect the rest.
+    Proxy,
+}
+
+/// Scheme the public caller used to reach the edge — drives
+/// `X-Forwarded-Proto` and the plain-HTTP fallback behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardScheme {
+    Http,
+    Https,
+}
+
+impl ForwardScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            ForwardScheme::Http => "http",
+            ForwardScheme::Https => "https",
+        }
+    }
+}
+
 /// Runtime limits passed through the edge proxy hot-path.
 #[derive(Clone)]
 pub struct HttpEdgeConfig {
     pub rate_limit_rps: u32,
     pub request_body_max_bytes: usize,
+    pub plain_http_mode: PlainHttpMode,
 }
 
 #[derive(Clone)]
@@ -78,6 +120,9 @@ struct ProxyCtx {
     domain: String,
     rate_limit_rps: u32,
     request_body_max_bytes: usize,
+    plain_http_mode: PlainHttpMode,
+    /// Public HTTPS port, used to build redirect Locations (omitted when 443).
+    https_port: u16,
 }
 
 // ── public entry point ────────────────────────────────────────────────────────
@@ -98,19 +143,21 @@ pub async fn run_http_edge(
         domain,
         rate_limit_rps: limits.rate_limit_rps,
         request_body_max_bytes: limits.request_body_max_bytes,
+        plain_http_mode: limits.plain_http_mode,
+        https_port: https_addr.port(),
     };
 
     tokio::select! {
-        r = run_http_redirect(http_addr, ctx.domain.clone()) => r,
-        r = run_https_proxy(https_addr, tls_config, ctx)    => r,
+        r = run_http_plain(http_addr, ctx.clone())        => r,
+        r = run_https_proxy(https_addr, tls_config, ctx)  => r,
     }
 }
 
-// ── HTTP redirect (port 80) ───────────────────────────────────────────────────
+// ── plain HTTP (port 80) ──────────────────────────────────────────────────────
 
-async fn run_http_redirect(addr: SocketAddr, domain: String) -> crate::error::Result<()> {
+async fn run_http_plain(addr: SocketAddr, ctx: ProxyCtx) -> crate::error::Result<()> {
     let listener = bind_reuse(addr)?;
-    info!(%addr, "HTTP redirect listener ready");
+    info!(%addr, mode = ?ctx.plain_http_mode, "HTTP listener ready");
 
     loop {
         let (tcp, peer) = match listener.accept().await {
@@ -121,24 +168,53 @@ async fn run_http_redirect(addr: SocketAddr, domain: String) -> crate::error::Re
             }
         };
         let _ = tcp.set_nodelay(true);
-        let domain = domain.clone();
+        let ctx = ctx.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(tcp);
             let svc = service_fn(move |req: Request<Incoming>| {
-                let domain = domain.clone();
-                async move { Ok::<_, Infallible>(redirect_to_https(req, &domain)) }
+                let ctx = ctx.clone();
+                async move { Ok::<_, Infallible>(plain_http_request(req, peer, ctx).await) }
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
+                .with_upgrades()
                 .await
             {
-                debug!(%peer, "HTTP redirect error: {e}");
+                debug!(%peer, "HTTP conn error: {e}");
             }
         });
     }
 }
 
-fn redirect_to_https(req: Request<Incoming>, domain: &str) -> Response<BoxBody> {
+/// Dispatch a plain-HTTP request: proxy it when `plain_http_mode = "proxy"`
+/// and the Host resolves to a registered tunnel, redirect to HTTPS otherwise.
+async fn plain_http_request(
+    req: Request<Incoming>,
+    peer: SocketAddr,
+    ctx: ProxyCtx,
+) -> Response<BoxBody> {
+    // Rate-limit before any routing work so the gate probe below cannot be
+    // driven unthrottled (and can't serve as a subdomain-existence oracle).
+    if !ctx.core.ip_limiter.check(peer.ip()) {
+        return err_response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded");
+    }
+
+    if ctx.plain_http_mode == PlainHttpMode::Proxy {
+        let resolvable = req
+            .headers()
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| extract_subdomain(h, &ctx.domain))
+            .map(|sub| ctx.core.has_http_route(&sub))
+            .unwrap_or(false);
+        if resolvable {
+            return proxy_request(req, peer, ctx, ForwardScheme::Http).await;
+        }
+    }
+    redirect_to_https(req, &ctx.domain, ctx.https_port)
+}
+
+fn redirect_to_https<B>(req: Request<B>, domain: &str, https_port: u16) -> Response<BoxBody> {
     // Sanitise the Host header to prevent header injection: only allow chars
     // that are valid in a hostname or port (alphanumeric, hyphens, dots, colon).
     let raw_host = req
@@ -147,15 +223,30 @@ fn redirect_to_https(req: Request<Incoming>, domain: &str) -> Response<BoxBody> 
         .and_then(|v| v.to_str().ok())
         .unwrap_or(domain);
     let host = sanitize_host(raw_host).unwrap_or_else(|| domain.to_string());
+    // Strip any incoming port; the redirect target is the HTTPS listener.
+    let mut name = host.split(':').next().unwrap_or(&host);
+    // Only redirect within our own domain — an arbitrary Host here would
+    // make this an open redirect (and, with 308, forward method + body to
+    // an attacker-chosen destination).
+    if name != domain && !name.ends_with(&format!(".{domain}")) {
+        name = domain;
+    }
+    let authority = if https_port == 443 {
+        name.to_string()
+    } else {
+        format!("{name}:{https_port}")
+    };
 
     let pq = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let location = format!("https://{host}{pq}");
+    let location = format!("https://{authority}{pq}");
+    // 308: permanent AND method/body-preserving. A 301 here turned followed
+    // POSTs (e.g. webhooks) into GETs.
     Response::builder()
-        .status(StatusCode::MOVED_PERMANENTLY)
+        .status(StatusCode::PERMANENT_REDIRECT)
         .header("Location", location)
         .body(empty())
         .unwrap()
@@ -222,7 +313,15 @@ async fn run_https_proxy(
             let io = TokioIo::new(tls);
             let svc = service_fn(move |req: Request<Incoming>| {
                 let ctx = ctx.clone();
-                async move { Ok::<_, Infallible>(proxy_request(req, peer, ctx).await) }
+                async move {
+                    if !ctx.core.ip_limiter.check(peer.ip()) {
+                        return Ok::<_, Infallible>(err_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "Rate limit exceeded",
+                        ));
+                    }
+                    Ok::<_, Infallible>(proxy_request(req, peer, ctx, ForwardScheme::Https).await)
+                }
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
@@ -241,13 +340,13 @@ async fn proxy_request(
     req: Request<Incoming>,
     peer: SocketAddr,
     ctx: ProxyCtx,
+    scheme: ForwardScheme,
 ) -> Response<BoxBody> {
     let start = Instant::now();
 
-    // ── 0. IP rate limit ──────────────────────────────────────────────────
-    if !ctx.core.ip_limiter.check(peer.ip()) {
-        return err_response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded");
-    }
+    // IP rate limiting already happened at the listener entry points
+    // (`plain_http_request` / the HTTPS service closure) — checking the
+    // sliding window again here would double-count each request.
 
     // ── 1. Extract subdomain ──────────────────────────────────────────────
     let host = match req.headers().get(HOST).and_then(|v| v.to_str().ok()) {
@@ -375,6 +474,9 @@ async fn proxy_request(
             req,
             yamux_stream,
             bytes_counter,
+            peer,
+            scheme,
+            &host,
             HttpCaptureCtx {
                 tx: ctx.capture_tx.clone(),
                 conn_id,
@@ -466,6 +568,9 @@ async fn forward_http(
     req: Request<Incoming>,
     yamux_stream: YamuxStream,
     bytes_counter: Arc<std::sync::atomic::AtomicU64>,
+    peer: SocketAddr,
+    scheme: ForwardScheme,
+    original_host: &str,
     capture: HttpCaptureCtx,
 ) -> Result<Response<BoxBody>, Box<dyn std::error::Error + Send + Sync>> {
     // Bridge yamux (futures::io) → tokio::io → hyper::rt IO.
@@ -484,6 +589,7 @@ async fn forward_http(
     // Strip hop-by-hop headers before forwarding upstream.
     let (mut parts, body) = req.into_parts();
     remove_hop_by_hop(&mut parts.headers);
+    set_forwarded_headers(&mut parts.headers, peer, scheme, original_host);
     let fwd_req = Request::from_parts(parts, body);
 
     let upstream = sender.send_request(fwd_req).await?;
@@ -637,6 +743,43 @@ fn remove_hop_by_hop(headers: &mut hyper::HeaderMap) {
     }
 }
 
+/// Add the standard reverse-proxy forwarding headers.
+///
+/// `X-Forwarded-For` appends the peer IP to any inbound value (standard
+/// chain behaviour, matching ngrok). Because this edge faces the internet
+/// directly, earlier entries in the chain are client-supplied and MUST NOT
+/// be trusted — backends should read the rightmost entry only. IPv6 peers
+/// are emitted unbracketed (nginx convention).
+///
+/// `X-Forwarded-Proto` and `X-Forwarded-Host` are overwritten — the edge is
+/// authoritative for both, so spoofed inbound values never reach the tunnel.
+fn set_forwarded_headers(
+    headers: &mut hyper::HeaderMap,
+    peer: SocketAddr,
+    scheme: ForwardScheme,
+    original_host: &str,
+) {
+    use hyper::header::HeaderValue;
+
+    let peer_ip = peer.ip().to_string();
+    let xff = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        Some(existing) => format!("{existing}, {peer_ip}"),
+        None => peer_ip,
+    };
+    if let Ok(v) = HeaderValue::from_str(&xff) {
+        headers.insert("x-forwarded-for", v);
+    }
+
+    headers.insert(
+        "x-forwarded-proto",
+        HeaderValue::from_static(scheme.as_str()),
+    );
+
+    if let Ok(v) = HeaderValue::from_str(original_host) {
+        headers.insert("x-forwarded-host", v);
+    }
+}
+
 fn err_response(status: StatusCode, msg: &str) -> Response<BoxBody> {
     Response::builder()
         .status(status)
@@ -717,6 +860,80 @@ mod tests {
             headers.contains_key("x-request-id"),
             "custom headers must survive"
         );
+    }
+
+    #[test]
+    fn redirect_is_permanent_and_method_preserving() {
+        let req = Request::builder()
+            .uri("/api/webhooks/sms/inbound?x=1")
+            .header("host", "myapp.tunnel.example.com")
+            .body(())
+            .unwrap();
+        let resp = redirect_to_https(req, "tunnel.example.com", 443);
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            "https://myapp.tunnel.example.com/api/webhooks/sms/inbound?x=1"
+        );
+    }
+
+    #[test]
+    fn redirect_never_leaves_our_domain() {
+        // A Host outside the configured domain must not become an open
+        // redirect target — fall back to the bare domain instead.
+        let req = Request::builder()
+            .uri("/steal")
+            .header("host", "evil.example.net")
+            .body(())
+            .unwrap();
+        let resp = redirect_to_https(req, "tunnel.example.com", 443);
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            "https://tunnel.example.com/steal"
+        );
+    }
+
+    #[test]
+    fn redirect_swaps_port_for_https_listener() {
+        // Incoming Host carries the plain-HTTP port; the Location must point
+        // at the HTTPS listener instead of echoing the original port.
+        let req = Request::builder()
+            .uri("/p")
+            .header("host", "myapp.tunnel.example.com:8080")
+            .body(())
+            .unwrap();
+        let resp = redirect_to_https(req, "tunnel.example.com", 8443);
+        assert_eq!(
+            resp.headers().get("Location").unwrap(),
+            "https://myapp.tunnel.example.com:8443/p"
+        );
+    }
+
+    #[test]
+    fn forwarded_headers_set_and_appended() {
+        use hyper::header::HeaderValue;
+        let peer: SocketAddr = "203.0.113.9:55555".parse().unwrap();
+
+        // Fresh request — headers created from scratch.
+        let mut headers = hyper::HeaderMap::new();
+        set_forwarded_headers(&mut headers, peer, ForwardScheme::Https, "app.example.com");
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "203.0.113.9");
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
+        assert_eq!(headers.get("x-forwarded-host").unwrap(), "app.example.com");
+
+        // Inbound X-Forwarded-For is appended to; spoofed Proto/Host are
+        // overwritten at the trust boundary.
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert("x-forwarded-host", HeaderValue::from_static("evil.example"));
+        set_forwarded_headers(&mut headers, peer, ForwardScheme::Http, "app.example.com");
+        assert_eq!(
+            headers.get("x-forwarded-for").unwrap(),
+            "198.51.100.1, 203.0.113.9"
+        );
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
+        assert_eq!(headers.get("x-forwarded-host").unwrap(), "app.example.com");
     }
 
     #[test]

@@ -83,6 +83,7 @@ async fn alert_webhook_fires_once_when_group_goes_zero_healthy() {
         load_balancing_enabled: true,
         alert_webhook_url: Some(webhook_url.clone()),
         server_version_override: None,
+        plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
     })
     .await;
 
@@ -223,6 +224,7 @@ async fn per_tenant_webhooks_fan_out_alongside_operator_url() {
         load_balancing_enabled: true,
         alert_webhook_url: Some(op_url.clone()),
         server_version_override: None,
+        plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
     })
     .await;
 
@@ -321,6 +323,7 @@ async fn shared_tenant_webhook_is_deduped() {
         load_balancing_enabled: true,
         alert_webhook_url: Some(op_url.clone()),
         server_version_override: None,
+        plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
     })
     .await;
 

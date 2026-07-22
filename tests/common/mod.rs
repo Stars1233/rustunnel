@@ -178,6 +178,10 @@ pub struct TestServerOpts {
     /// the client's version-gate falls through to solo registration
     /// without spamming `decode_frame` warnings.
     pub server_version_override: Option<String>,
+    /// Plain-HTTP (port 80) listener behaviour. Most tests use `Proxy`
+    /// (the rustunnel.com edge posture); `Redirect` covers the
+    /// conservative default of shipped configs.
+    pub plain_http_mode: rustunnel_server::edge::PlainHttpMode,
 }
 
 /// A running server instance with all components live on random ports.
@@ -307,6 +311,7 @@ impl TestServer {
             load_balancing_enabled,
             alert_webhook_url: None,
             server_version_override: None,
+            plain_http_mode: rustunnel_server::edge::PlainHttpMode::Proxy,
         })
         .await
     }
@@ -327,6 +332,7 @@ impl TestServer {
             load_balancing_enabled,
             alert_webhook_url,
             server_version_override,
+            plain_http_mode,
         } = opts;
         let admin_token = admin_token.as_str();
         let [tcp_low, tcp_high] = tcp_port_range;
@@ -346,6 +352,7 @@ impl TestServer {
                 control_port,
                 dashboard_port,
                 dashboard_origin: "http://localhost:3000".to_string(),
+                plain_http_mode,
             },
             tls: TlsSection {
                 cert_path: cert_path.clone(),
@@ -450,6 +457,7 @@ impl TestServer {
             let limits = rustunnel_server::edge::HttpEdgeConfig {
                 rate_limit_rps: config.limits.rate_limit_rps,
                 request_body_max_bytes: config.limits.request_body_max_bytes,
+                plain_http_mode: config.server.plain_http_mode,
             };
             async move {
                 let _ = rustunnel_server::edge::run_http_edge(

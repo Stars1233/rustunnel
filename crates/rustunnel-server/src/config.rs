@@ -140,6 +140,12 @@ pub struct ServerSection {
     /// Allowed CORS origin for the external dashboard (e.g. "https://dashboard.rustunnel.com")
     #[serde(default = "default_dashboard_origin")]
     pub dashboard_origin: String,
+    /// Plain-HTTP (port 80) behaviour: `"proxy"` forwards requests whose
+    /// subdomain resolves to a tunnel (ngrok parity — required for signed
+    /// webhooks configured with an `http://` URL) and redirects the rest;
+    /// `"redirect"` (default) 308-redirects everything to HTTPS.
+    #[serde(default)]
+    pub plain_http_mode: crate::edge::PlainHttpMode,
 }
 
 fn default_dashboard_port() -> u16 {
@@ -318,6 +324,7 @@ impl Default for ServerConfig {
                 control_port: 9000,
                 dashboard_port: 4040,
                 dashboard_origin: "http://localhost:3000".to_string(),
+                plain_http_mode: crate::edge::PlainHttpMode::default(),
             },
             tls: TlsSection {
                 cert_path: "cert.pem".to_string(),

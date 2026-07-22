@@ -190,6 +190,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         let limits = HttpEdgeConfig {
             rate_limit_rps: config.limits.rate_limit_rps,
             request_body_max_bytes: config.limits.request_body_max_bytes,
+            plain_http_mode: config.server.plain_http_mode,
         };
         tokio::spawn(async move {
             if let Err(e) = run_http_edge(
