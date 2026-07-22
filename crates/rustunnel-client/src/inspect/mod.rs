@@ -379,13 +379,17 @@ impl Inspector {
     }
 
     /// Local address of the tunnel a request arrived on, for replay.
+    ///
+    /// Matches by name only. Falling back to another tunnel would let a replay
+    /// hit the wrong local service — with several HTTP tunnels registered, that
+    /// could re-issue a mutating request against a different app. Callers
+    /// surface `None` as a conflict instead.
     pub fn local_addr_for(&self, tunnel: &str) -> Option<String> {
         let session = self.session.lock().unwrap();
         session
             .tunnels
             .iter()
             .find(|t| t.name == tunnel)
-            .or_else(|| session.tunnels.first())
             .map(|t| t.local.clone())
     }
 
@@ -564,6 +568,41 @@ mod tests {
         assert_eq!(
             inspector.local_addr_for("web").as_deref(),
             Some("localhost:3000")
+        );
+    }
+
+    /// Replay must resolve the tunnel it actually belongs to. With several HTTP
+    /// tunnels registered, falling back to the first one would re-issue the
+    /// request against a different local service.
+    #[test]
+    fn local_addr_matches_by_name_and_never_falls_back() {
+        let inspector = Inspector::new(true, "edge.test:4040".into(), None);
+        inspector.set_tunnels(vec![
+            TunnelInfo {
+                name: "web".into(),
+                proto: "http".into(),
+                local: "localhost:3000".into(),
+                public_url: "https://web.edge.test".into(),
+                healthy: None,
+            },
+            TunnelInfo {
+                name: "api".into(),
+                proto: "http".into(),
+                local: "localhost:8080".into(),
+                public_url: "https://api.edge.test".into(),
+                healthy: None,
+            },
+        ]);
+
+        assert_eq!(
+            inspector.local_addr_for("api").as_deref(),
+            Some("localhost:8080"),
+            "must resolve the second tunnel, not the first"
+        );
+        assert_eq!(
+            inspector.local_addr_for("gone").as_deref(),
+            None,
+            "an unknown tunnel must not resolve to some other service"
         );
     }
 

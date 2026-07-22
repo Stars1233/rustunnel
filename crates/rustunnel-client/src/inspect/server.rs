@@ -219,9 +219,14 @@ async fn replay_request(
         )
     })?;
 
-    let url = format!("http://{}{}", local_addr, original.path);
+    let url = format!("http://{}{}", local_addr, origin_form(&original.path));
     let client = reqwest::Client::builder()
         .timeout(REPLAY_TIMEOUT)
+        // Never follow redirects. A replay must report what the local service
+        // itself returned — following a 3xx would record the destination's
+        // response instead, and would send this request (carrying the captured
+        // credentials) somewhere the service merely pointed at.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -287,6 +292,30 @@ async fn replay_request(
     })))
 }
 
+/// Reduce a captured request-target to origin-form (`/path?query`) so it can be
+/// appended to the local base URL.
+///
+/// Most requests already arrive in origin-form. A proxy-style client may send
+/// absolute-form (`GET http://host/path HTTP/1.1`), which would otherwise
+/// concatenate into a nonsense URL like `http://localhost:3000http://host/path`.
+fn origin_form(target: &str) -> &str {
+    if target.starts_with('/') {
+        return target;
+    }
+    for scheme in ["http://", "https://"] {
+        if let Some(rest) = target.strip_prefix(scheme) {
+            // Everything from the first '/' after the authority is the path.
+            return match rest.find('/') {
+                Some(slash) => &rest[slash..],
+                None => "/",
+            };
+        }
+    }
+    // Asterisk-form (`OPTIONS *`) and anything unrecognised: replay the root
+    // rather than building an invalid URL.
+    "/"
+}
+
 /// Headers that describe a single hop and must not be copied into a replay.
 fn is_hop_by_hop(name: &str) -> bool {
     const HOP_BY_HOP: [&str; 8] = [
@@ -309,6 +338,141 @@ fn is_hop_by_hop(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inspect::{Body, TunnelInfo};
+    use uuid::Uuid;
+
+    /// Record an exchange as if it had been captured on `tunnel`.
+    fn seed_exchange(inspector: &Arc<Inspector>, tunnel: &str, path: &str) -> u64 {
+        inspector
+            .record(Exchange {
+                id: 0,
+                conn_id: Uuid::nil(),
+                tunnel: tunnel.to_string(),
+                client_addr: "203.0.113.5:40000".into(),
+                method: "GET".into(),
+                path: path.to_string(),
+                host: None,
+                status: 200,
+                request_headers: vec![("x-marker".into(), "original".into())],
+                response_headers: vec![],
+                request_body: Body::default(),
+                response_body: Body::default(),
+                duration_ms: 1,
+                started_at: Utc::now(),
+                replayed: false,
+            })
+            .id
+    }
+
+    /// Serve one fixed response on loopback; returns its `host:port`.
+    async fn spawn_service(response: &'static str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        format!("127.0.0.1:{}", addr.port())
+    }
+
+    /// A replay must record the redirect the local service actually returned,
+    /// not chase it — following it would both misreport the response and send
+    /// the captured credentials on to wherever `Location` points.
+    #[tokio::test]
+    async fn replay_records_redirects_instead_of_following_them() {
+        let local = spawn_service(
+            "HTTP/1.1 302 Found\r\nLocation: http://example.com/elsewhere\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+
+        let inspector = Inspector::new(true, "edge.test:4040".into(), None);
+        inspector.set_tunnels(vec![TunnelInfo {
+            name: "web".into(),
+            proto: "http".into(),
+            local: local.clone(),
+            public_url: "https://web.edge.test".into(),
+            healthy: None,
+        }]);
+        let id = seed_exchange(&inspector, "web", "/go");
+
+        let response = replay_request(State(Arc::clone(&inspector)), Path(id))
+            .await
+            .expect("replay should succeed");
+
+        assert_eq!(response.0["replayed"]["status"], 302);
+        let recorded = inspector.exchanges();
+        assert!(recorded[0].replayed);
+        assert_eq!(recorded[0].status, 302);
+        assert!(
+            recorded[0]
+                .response_headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("location")
+                    && v == "http://example.com/elsewhere"),
+            "the Location header must be preserved for the UI"
+        );
+    }
+
+    /// Replay resolves the tunnel by name; an unknown tunnel is a conflict
+    /// rather than a request sent to some other local service.
+    #[tokio::test]
+    async fn replay_refuses_when_the_tunnel_is_unknown() {
+        let inspector = Inspector::new(true, "edge.test:4040".into(), None);
+        inspector.set_tunnels(vec![TunnelInfo {
+            name: "web".into(),
+            proto: "http".into(),
+            local: "127.0.0.1:9".into(),
+            public_url: "https://web.edge.test".into(),
+            healthy: None,
+        }]);
+        let id = seed_exchange(&inspector, "retired-tunnel", "/x");
+
+        let error = replay_request(State(Arc::clone(&inspector)), Path(id))
+            .await
+            .expect_err("must not replay against a different tunnel");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn replay_normalises_an_absolute_form_request_target() {
+        let local = spawn_service("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+
+        let inspector = Inspector::new(true, "edge.test:4040".into(), None);
+        inspector.set_tunnels(vec![TunnelInfo {
+            name: "web".into(),
+            proto: "http".into(),
+            local: local.clone(),
+            public_url: "https://web.edge.test".into(),
+            healthy: None,
+        }]);
+        // Proxy-style absolute-form target, which would otherwise build
+        // `http://127.0.0.1:PORT http://web.edge.test/thing` and fail to parse.
+        let id = seed_exchange(&inspector, "web", "http://web.edge.test/thing?a=1");
+
+        let response = replay_request(State(Arc::clone(&inspector)), Path(id))
+            .await
+            .expect("absolute-form target should still replay");
+        assert_eq!(response.0["replayed"]["status"], 200);
+    }
+
+    #[test]
+    fn origin_form_reduces_every_request_target_shape() {
+        assert_eq!(origin_form("/plain?q=1"), "/plain?q=1");
+        assert_eq!(origin_form("http://host/path?q=1"), "/path?q=1");
+        assert_eq!(origin_form("https://host:8443/deep/path"), "/deep/path");
+        assert_eq!(origin_form("http://host"), "/");
+        assert_eq!(origin_form("*"), "/");
+    }
 
     #[test]
     fn hop_by_hop_headers_are_stripped_case_insensitively() {
