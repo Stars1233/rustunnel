@@ -1,0 +1,321 @@
+<!-- Local request inspector UI. Served by inspect::server on loopback only. -->
+<!-- Self-contained on purpose: no CDN, no build step, no network access. -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustunnel — inspect</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f7f8fa; --border: #e3e6ea; --text: #1d2127;
+    --muted: #6b7280; --accent: #0b7285; --sel: #e7f5f8;
+    --green: #197d3f; --yellow: #9a6700; --red: #b42318; --cyan: #0b7285; --violet: #6d28d9;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1a1e24; --border: #2a2f37; --text: #e6e9ef;
+      --muted: #9099a6; --accent: #3bc9db; --sel: #1e2a30;
+      --green: #51cf66; --yellow: #fcc419; --red: #ff6b6b; --cyan: #3bc9db; --violet: #b197fc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .brand { font-weight: 700; letter-spacing: -0.01em; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px; }
+  .dot.off { background: var(--red); }
+  .meta { color: var(--muted); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .spacer { flex: 1; }
+  input[type=search] {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); min-width: 200px; font: inherit;
+  }
+  button {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); cursor: pointer; font: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #list { width: 46%; min-width: 320px; overflow-y: auto; border-right: 1px solid var(--border); }
+  #detail { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  tbody tr { cursor: pointer; border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--panel); }
+  tbody tr.selected { background: var(--sel); }
+  td { padding: 7px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  td.path { font-family: var(--mono); font-size: 12.5px; max-width: 1px; width: 100%; }
+  td.num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .m { font-family: var(--mono); font-weight: 600; font-size: 12px; }
+  .m.GET { color: var(--cyan); } .m.POST { color: var(--yellow); }
+  .m.PUT, .m.PATCH { color: var(--violet); } .m.DELETE { color: var(--red); }
+  .s2 { color: var(--green); font-weight: 600; } .s3 { color: var(--cyan); }
+  .s4 { color: var(--yellow); font-weight: 600; } .s5 { color: var(--red); font-weight: 600; }
+  .replay-tag {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--muted);
+  }
+
+  .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+  h2 { margin: 0 0 4px; font-size: 18px; font-family: var(--mono); word-break: break-all; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .tab {
+    padding: 7px 12px; cursor: pointer; border: none; background: none;
+    color: var(--muted); border-bottom: 2px solid transparent; border-radius: 0;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--accent); }
+  section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 16px 0 6px; }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+  }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; font-size: 13px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  .kv { font-family: var(--mono); font-size: 12.5px; }
+  .kv div { padding: 3px 0; border-bottom: 1px solid var(--border); word-break: break-all; }
+  .kv span { color: var(--accent); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .err { color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">rustunnel</span>
+  <span id="status"><span class="dot"></span><span id="status-text">connecting</span></span>
+  <div class="meta" id="meta"></div>
+  <span class="spacer"></span>
+  <input type="search" id="filter" placeholder="Filter method, path, status…" autocomplete="off">
+  <button id="clear">Clear</button>
+</header>
+
+<main>
+  <div id="list"><div class="empty">Waiting for requests…</div></div>
+  <div id="detail"><div class="empty">Select a request to inspect it.</div></div>
+</main>
+
+<script>
+"use strict";
+const rows = new Map();      // id -> summary
+let selectedId = null;
+let activeTab = "summary";
+let detailCache = null;      // full detail of the selected request
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const statusClass = (s) => "s" + String(s).charAt(0);
+const fmtBytes = (n) => {
+  if (n < 1024) return n + " B";
+  const units = ["kB", "MB", "GB"];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(1) + " " + units[i];
+};
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleTimeString([], { hour12: false });
+};
+
+// ── request list ────────────────────────────────────────────────────────────
+
+function matchesFilter(r) {
+  const q = $("filter").value.trim().toLowerCase();
+  if (!q) return true;
+  return (r.path + " " + r.method + " " + r.status).toLowerCase().includes(q);
+}
+
+function renderList() {
+  const items = [...rows.values()].sort((a, b) => b.id - a.id).filter(matchesFilter);
+  const list = $("list");
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">No requests yet. Send traffic through your tunnel.</div>';
+    return;
+  }
+  list.innerHTML = "<table><tbody>" + items.map((r) => `
+    <tr data-id="${r.id}" class="${r.id === selectedId ? "selected" : ""}">
+      <td class="num">${fmtTime(r.started_at)}</td>
+      <td><span class="m ${esc(r.method)}">${esc(r.method)}</span></td>
+      <td class="path">${esc(r.path)}${r.replayed ? ' <span class="replay-tag">replay</span>' : ""}</td>
+      <td class="num ${statusClass(r.status)}">${r.status}</td>
+      <td class="num">${r.duration_ms} ms</td>
+    </tr>`).join("") + "</tbody></table>";
+
+  for (const tr of list.querySelectorAll("tr")) {
+    tr.onclick = () => select(Number(tr.dataset.id));
+  }
+}
+
+function addRow(summary) {
+  rows.set(summary.id, summary);
+  renderList();
+}
+
+// ── detail pane ─────────────────────────────────────────────────────────────
+
+async function select(id) {
+  selectedId = id;
+  renderList();
+  const res = await fetch(`/api/requests/${id}`);
+  if (!res.ok) {
+    $("detail").innerHTML = '<div class="empty err">This request is no longer in the buffer.</div>';
+    return;
+  }
+  detailCache = await res.json();
+  renderDetail();
+}
+
+function renderDetail() {
+  const d = detailCache;
+  if (!d) return;
+  const tabs = ["summary", "headers", "raw"];
+  $("detail").innerHTML = `
+    <h2><span class="m ${esc(d.method)}">${esc(d.method)}</span> ${esc(d.path)}</h2>
+    <div class="sub">
+      <span class="${statusClass(d.status)}">${d.status}</span> ·
+      ${d.duration_ms} ms · ${esc(d.client_addr)} · ${fmtTime(d.started_at)}
+      ${d.replayed ? ' · <span class="replay-tag">replay</span>' : ""}
+    </div>
+    <div class="tabs">
+      ${tabs.map((t) => `<button class="tab ${t === activeTab ? "active" : ""}" data-tab="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
+      <span class="spacer"></span>
+      <button class="primary" id="replay">Replay</button>
+    </div>
+    <div id="tab-body"></div>`;
+
+  for (const tab of $("detail").querySelectorAll(".tab")) {
+    tab.onclick = () => { activeTab = tab.dataset.tab; renderDetail(); };
+  }
+  $("replay").onclick = replay;
+  $("tab-body").innerHTML = { summary: tabSummary, headers: tabHeaders, raw: tabRaw }[activeTab](d);
+}
+
+function bodyBlock(label, body) {
+  if (!body || body.size === 0) return `<h3>${label}</h3><p class="note">No body.</p>`;
+  const note = body.truncated
+    ? `<p class="note">Showing the first ${fmtBytes(body.text ? body.text.length : 0)} of ${fmtBytes(body.size)} — capture is capped.</p>`
+    : "";
+  if (body.binary) {
+    return `<h3>${label} <span class="note">(binary, ${fmtBytes(body.size)})</span></h3>
+            <pre>${esc(body.preview || "")}</pre>${note}`;
+  }
+  return `<h3>${label} <span class="note">(${fmtBytes(body.size)})</span></h3>
+          <pre>${esc(body.text)}</pre>${note}`;
+}
+
+function tabSummary(d) {
+  return `
+    <dl>
+      <dt>Tunnel</dt><dd>${esc(d.tunnel)}</dd>
+      <dt>Host</dt><dd>${esc(d.host || "—")}</dd>
+      <dt>Client</dt><dd>${esc(d.client_addr)}</dd>
+      <dt>Request</dt><dd>${fmtBytes(d.request_bytes)}</dd>
+      <dt>Response</dt><dd>${fmtBytes(d.response_bytes)}</dd>
+    </dl>
+    ${bodyBlock("Request body", d.request_body)}
+    ${bodyBlock("Response body", d.response_body)}`;
+}
+
+function headerList(headers) {
+  if (!headers.length) return '<p class="note">None.</p>';
+  return '<div class="kv">' + headers
+    .map((h) => `<div><span>${esc(h.name)}:</span> ${esc(h.value)}</div>`).join("") + "</div>";
+}
+
+function tabHeaders(d) {
+  return `<h3>Request headers</h3>${headerList(d.request_headers)}
+          <h3>Response headers</h3>${headerList(d.response_headers)}`;
+}
+
+function tabRaw(d) {
+  const head = (first, headers) =>
+    [first, ...headers.map((h) => `${h.name}: ${h.value}`)].join("\n");
+  const reqBody = d.request_body.binary ? "[binary body]" : (d.request_body.text || "");
+  const resBody = d.response_body.binary ? "[binary body]" : (d.response_body.text || "");
+  return `
+    <h3>Request</h3>
+    <pre>${esc(head(`${d.method} ${d.path} HTTP/1.1`, d.request_headers))}\n\n${esc(reqBody)}</pre>
+    <h3>Response</h3>
+    <pre>${esc(head(`HTTP/1.1 ${d.status}`, d.response_headers))}\n\n${esc(resBody)}</pre>`;
+}
+
+async function replay() {
+  const button = $("replay");
+  button.disabled = true;
+  button.textContent = "Replaying…";
+  try {
+    const res = await fetch(`/api/requests/${selectedId}/replay`, { method: "POST" });
+    if (!res.ok) {
+      const text = await res.text();
+      button.textContent = "Replay failed";
+      $("tab-body").insertAdjacentHTML("afterbegin", `<p class="err">${esc(text)}</p>`);
+      return;
+    }
+    const result = await res.json();
+    addRow(result.replayed);
+    await select(result.replayed.id);   // jump to the replayed request
+  } finally {
+    setTimeout(() => { if ($("replay")) { $("replay").disabled = false; $("replay").textContent = "Replay"; } }, 800);
+  }
+}
+
+// ── header status ───────────────────────────────────────────────────────────
+
+async function refreshStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    $("status-text").textContent = s.status;
+    $("status").querySelector(".dot").className = "dot" + (s.status === "online" ? "" : " off");
+    const tunnels = s.tunnels.map((t) =>
+      `<span><b>${esc(t.public_url)}</b> → ${esc(t.local)}</span>`).join("");
+    $("meta").innerHTML = tunnels + `
+      <span>conns <b>${s.stats.conns_open}</b> open / ${s.stats.conns_total} total</span>
+      <span>↑ <b>${fmtBytes(s.stats.bytes_to_tunnel)}</b> ↓ <b>${fmtBytes(s.stats.bytes_to_local)}</b></span>
+      <span>p50 <b>${s.p50_ms} ms</b> · p90 <b>${s.p90_ms} ms</b></span>
+      ${s.latency_ms != null ? `<span>edge <b>${s.latency_ms} ms</b></span>` : ""}`;
+  } catch (e) {
+    $("status-text").textContent = "inspector offline";
+    $("status").querySelector(".dot").className = "dot off";
+  }
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+$("filter").oninput = renderList;
+$("clear").onclick = async () => {
+  await fetch("/api/requests", { method: "DELETE" });
+  rows.clear();
+  selectedId = null;
+  detailCache = null;
+  $("detail").innerHTML = '<div class="empty">Select a request to inspect it.</div>';
+  renderList();
+};
+
+fetch("/api/requests?limit=500")
+  .then((r) => r.json())
+  .then((data) => { data.requests.forEach((r) => rows.set(r.id, r)); renderList(); });
+
+new EventSource("/api/stream").onmessage = (event) => addRow(JSON.parse(event.data));
+
+refreshStatus();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>

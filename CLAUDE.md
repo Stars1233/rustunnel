@@ -84,7 +84,7 @@ Four crates in `crates/`, plus integration tests and a Next.js dashboard (`dashb
 |-------|---------|
 | `rustunnel-protocol` | Shared `ControlFrame` enum + `TunnelProtocol` (Http/Https/Tcp/Udp/P2p) and serialization |
 | `rustunnel-server` | Server: control plane, HTTP/TCP/UDP edges, dashboard, TLS, ACME |
-| `rustunnel-client` | CLI client with auto-reconnect, local port forwarding, P2P/STUN, region auto-select |
+| `rustunnel-client` | CLI client with auto-reconnect, local port forwarding, P2P/STUN, region auto-select, Ratatui terminal UI (`src/tui/`) and a loopback request inspector (`src/inspect/`) |
 | `rustunnel-mcp` | MCP server exposing rustunnel as tools to AI agents |
 
 ## Architecture

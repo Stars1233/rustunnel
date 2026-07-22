@@ -21,9 +21,10 @@
 6. [Region Selection](#region-selection)
 7. [Reconnection Behavior](#reconnection-behavior)
 8. [Terminal Output](#terminal-output)
-9. [Environment Variables](#environment-variables)
-10. [Error Reference](#error-reference)
-11. [Troubleshooting](#troubleshooting)
+9. [Request Inspector](#request-inspector)
+10. [Environment Variables](#environment-variables)
+11. [Error Reference](#error-reference)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -517,6 +518,9 @@ This table summarises all flags across all commands:
 | `--no-reconnect` | http, tcp | Exit on failure instead of reconnecting |
 | `--insecure` | http, tcp | Skip TLS certificate verification |
 | `--json` | http, tcp, udp, p2p, start, token create | Emit machine-readable NDJSON events on stdout instead of human output |
+| `--no-tui` | http, tcp, udp, p2p, start | Disable the full-screen terminal UI; print one line per request instead |
+| `--inspect-port <port>` | http, tcp, udp, p2p, start | Port for the local web inspector (default `4040`; `0` picks any free port) |
+| `--no-inspect` | http, tcp, udp, p2p, start | Disable the local web inspector |
 | `-c, --config <path>` | start | Config file path |
 | `--name <label>` | token create | Token label (required) |
 | `--admin-token <token>` | token create | Admin token for dashboard API |
@@ -600,7 +604,61 @@ rustunnel http 3000 --no-reconnect || echo "Tunnel exited"
 
 ## Terminal Output
 
-### Connecting spinner
+When stdout is a terminal, the client takes over the screen with a live UI.
+Otherwise — piped output, CI, `--no-tui`, or `--json` — it falls back to the
+line-based output described further down.
+
+### Terminal UI
+
+```
+┌ rustunnel ───────────────────────────────────────────────────────────────────┐
+│Session  ● online                    Server   eu.edge.rustunnel.com:4040      │
+│Uptime   00:12:43                    Region   eu · 57ms                       │
+│Version  0.8.2                       Inspect  http://127.0.0.1:4040           │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Tunnels ─────────────────────────────────────────────────────────────────────┐
+│HTTP   web    http://bb176fb6.eu.edge.rustunnel.com  → localhost:3000  ● healthy│
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Traffic ─────────────────────────────────────────────────────────────────────┐
+│Conns    2 open · 27 total    Requests 1204                        req/s       │
+│Traffic  ↑ 1.2 MB  ↓ 830.0 kB    Latency  p50 6ms · p90 41ms      ▁▂▃▅▂▁▃▂    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Requests ────────────────────────────────────────────────────────────────────┐
+│23:21:54 GET     /style.css                    200   3 ms    95.99.57.76:51224│
+│23:21:53 POST    /api/items                    201  18 ms    95.99.57.76:51223│
+│23:21:53 GET     /missing                      404   2 ms    95.99.57.76:51222│
+└──────────────────────────────────────────────────────────────────────────────┘
+q quit  ↑↓ scroll  f pause  c clear  l logs
+```
+
+- **Session** — connection state, uptime, client version, edge server, region and
+  live control-plane latency (measured from the keepalive round-trip), and the
+  local inspector URL.
+- **Tunnels** — one row per tunnel with its public URL, local target, and health
+  when a `health_check` is configured.
+- **Traffic** — open/total connections, bytes each way, p50/p90 request duration,
+  and a requests-per-second sparkline.
+- **Requests** — live log of every HTTP request: time, method, path, status,
+  duration, and the public client address. Replayed requests are marked `↻`.
+
+Keys:
+
+| Key | Action |
+|-----|--------|
+| `q`, `Esc`, `Ctrl-C` | Quit (closes the tunnel) |
+| `↑` `↓` / `k` `j` | Scroll the request log |
+| `PgUp` / `PgDn` | Scroll by page |
+| `g` / `G` | Jump to newest / oldest |
+| `f` | Pause or resume following new requests |
+| `c` | Clear the captured requests |
+| `l` | Toggle the log pane (client diagnostics) |
+
+Only HTTP tunnels produce request rows. TCP and UDP tunnels are opaque byte
+streams, so they show connection and traffic counters only.
+
+### Line mode
+
+With `--no-tui`, a non-terminal stdout, or `--json`, output stays line-based.
 
 While establishing the connection a spinner is shown:
 
@@ -609,8 +667,6 @@ While establishing the connection a spinner is shown:
 ⠹ Authenticating…
 ⠸ Registering tunnels…
 ```
-
-### Startup box
 
 Once all tunnels are registered, a bordered box appears:
 
@@ -625,6 +681,8 @@ Once all tunnels are registered, a bordered box appears:
 ╰────────────────────────────────────────────────────────────╯
 
   ✓ Tunnels active. Press Ctrl-C to quit.
+
+  Inspect http://127.0.0.1:4040
 ```
 
 Color coding:
@@ -632,6 +690,14 @@ Color coding:
 - Tunnel name — dim
 - Public URL — **bold green**
 - Border — cyan
+
+Requests then stream one per line as they arrive:
+
+```
+23:21:54    GET /style.css                     200 3ms
+23:21:53   POST /api/items                     201 18ms
+23:21:53    GET /missing                       404 2ms
+```
 
 ### JSON output (`--json`)
 
@@ -645,7 +711,52 @@ Events: `tunnel_ready` (includes `public_addr` host:port for tcp/udp), `reconnec
 
 ### Graceful shutdown
 
-Press `Ctrl-C` to cleanly close the tunnel and exit. The control WebSocket is closed before the process exits.
+Press `Ctrl-C` to cleanly close the tunnel and exit. The control WebSocket is closed before the process exits. In the terminal UI, `q` and `Esc` do the same.
+
+---
+
+## Request Inspector
+
+Every tunnel session also starts a small web inspector on loopback, printed at
+startup and shown in the terminal UI:
+
+```
+Inspect http://127.0.0.1:4040
+```
+
+Open it to browse everything that flowed through the tunnel:
+
+- **Request list** — live-updating, with method, path, status, and duration.
+  Filter by method, path, or status.
+- **Detail view** — Summary (bodies), Headers (full request and response
+  headers), and Raw (the reconstructed HTTP messages).
+- **Replay** — re-issue any captured request against your local service without
+  the original caller doing anything. Handy for webhooks: trigger once, then
+  iterate against the same payload. Replayed requests appear in the list marked
+  `replay`.
+
+### Scope and limits
+
+- Captures **HTTP tunnels only**. TCP and UDP tunnels are raw byte streams; they
+  contribute connection and traffic counters but no request entries.
+- Keeps the **last 500 requests in memory**, per process. Nothing is written to
+  disk and nothing survives a restart.
+- Bodies are captured up to **64 KB each**; larger ones are marked truncated
+  (the reported size is still exact). A truncated request body cannot be
+  replayed byte-for-byte.
+- WebSocket and other upgraded connections are recorded as their handshake
+  (`101`); the frames afterwards are not parsed.
+
+### Configuration
+
+| Flag | Effect |
+|------|--------|
+| `--inspect-port <port>` | Bind a specific port (default `4040`). If it is taken, the next free port is used and the real URL is displayed. |
+| `--no-inspect` | Disable the inspector entirely. |
+
+The inspector binds `127.0.0.1` only and has no authentication, so treat it as
+local-only — captured payloads may contain credentials, tokens, and personal
+data. Use `--no-inspect` on shared or multi-user machines.
 
 ---
 
