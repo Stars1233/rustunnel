@@ -707,7 +707,14 @@ With `--json`, the spinner and startup box are suppressed and stdout instead car
 {"event":"tunnel_ready","protocol":"http","public_url":"https://myapp.tunnel.example.com","local_port":3000,"local_host":"localhost","tunnel_id":"6f9a…","name":"myapp"}
 ```
 
-Events: `tunnel_ready` (includes `public_addr` host:port for tcp/udp), `reconnecting` (`attempt`, `reason`, `delay_secs`), `reconnected`, `error` (`code`, `message`, `hint`; exit code 1 follows), and `token_created` (for `token create --json`). Diagnostics still go to stderr.
+Events: `inspector_ready` (`url`; emitted once at startup when the request inspector is enabled), `tunnel_ready` (includes `public_addr` host:port for tcp/udp), `reconnecting` (`attempt`, `reason`, `delay_secs`), `reconnected`, `error` (`code`, `message`, `hint`; exit code 1 follows), and `token_created` (for `token create --json`). Diagnostics still go to stderr.
+
+A `--json` session that also runs the inspector emits it first, so a script can pick the port up before any traffic arrives:
+
+```json
+{"event":"inspector_ready","url":"http://127.0.0.1:4040"}
+{"event":"tunnel_ready","protocol":"http","public_url":"https://myapp.tunnel.example.com","local_port":3000,"local_host":"localhost"}
+```
 
 ### Graceful shutdown
 
@@ -753,6 +760,10 @@ Open it to browse everything that flowed through the tunnel:
 |------|--------|
 | `--inspect-port <port>` | Bind a specific port (default `4040`). If it is taken, the next free port is used and the real URL is displayed. |
 | `--no-inspect` | Disable the inspector entirely. |
+
+Because the port can shift when the preferred one is taken, always read the
+actual URL rather than assuming `4040` — from the terminal UI header, the line
+under the startup box, or the `inspector_ready` event in `--json` mode.
 
 The inspector binds `127.0.0.1` only and has no authentication, so treat it as
 local-only — captured payloads may contain credentials, tokens, and personal

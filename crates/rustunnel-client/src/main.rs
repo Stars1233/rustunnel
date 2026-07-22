@@ -345,7 +345,11 @@ async fn run_session(
     if use_inspector {
         match inspect::server::bind(ui.inspect_port).await {
             Some((listener, url)) => {
-                inspector.set_inspect_url(url);
+                inspector.set_inspect_url(url.clone());
+                // Human modes print this under the startup box / in the TUI
+                // header; JSON consumers get it as an event so the bound port
+                // is discoverable rather than invisible.
+                output::emit(&output::Event::InspectorReady { url });
                 tokio::spawn(inspect::server::serve(listener, Arc::clone(&inspector)));
             }
             None => warn!(
