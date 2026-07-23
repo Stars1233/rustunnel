@@ -11,21 +11,33 @@ mod control;
 mod display;
 mod error;
 mod health;
+mod inspect;
 mod output;
 mod p2p_direct;
 mod proxy;
 mod reconnect;
 mod regions;
 mod stun;
+mod tui;
 mod version;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use console::Term;
+use tokio::sync::broadcast::error::RecvError;
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use config::{ClientConfig, TunnelDef};
+use inspect::{Exchange, Inspector, SessionStatus};
+
+/// How long to wait for the tunnel session to wind down after the UI exits
+/// before abandoning it. The process is on its way out either way.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -104,6 +116,27 @@ struct TunnelArgs {
     /// reconnecting, reconnected, error.
     #[arg(long)]
     json: bool,
+
+    #[command(flatten)]
+    ui: UiArgs,
+}
+
+/// Flags controlling the two user interfaces. Shared by every tunnel command.
+#[derive(Args, Clone, Copy)]
+struct UiArgs {
+    /// Disable the full-screen terminal UI and print one line per request
+    /// instead. Implied when stdout is not a terminal or `--json` is used.
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Port for the local web inspector. Scans forward if taken; 0 picks any
+    /// free port.
+    #[arg(long, default_value_t = inspect::server::DEFAULT_PORT)]
+    inspect_port: u16,
+
+    /// Disable the local web inspector.
+    #[arg(long)]
+    no_inspect: bool,
 }
 
 #[derive(Args, Clone)]
@@ -152,6 +185,9 @@ struct P2pArgs {
     /// reconnecting, reconnected, error.
     #[arg(long)]
     json: bool,
+
+    #[command(flatten)]
+    ui: UiArgs,
 }
 
 #[derive(Args)]
@@ -165,6 +201,9 @@ struct StartArgs {
     /// reconnecting, reconnected, error.
     #[arg(long)]
     json: bool,
+
+    #[command(flatten)]
+    ui: UiArgs,
 }
 
 #[derive(Args)]
@@ -275,10 +314,117 @@ async fn run_tunnel(proto: &str, args: TunnelArgs) -> error::Result<()> {
         args.subdomain,
     )];
 
-    if args.no_reconnect {
-        control::connect(&cfg, &tunnels).await
+    run_session(cfg, tunnels, args.no_reconnect, args.ui).await
+}
+
+// ── session runner ────────────────────────────────────────────────────────────
+
+/// Start the inspector and the terminal UI (when appropriate), then run the
+/// tunnel session under them.
+///
+/// The terminal UI is skipped whenever stdout is not a terminal, `--no-tui` is
+/// passed, or `--json` is active — those runs keep the original line-based
+/// behaviour exactly.
+async fn run_session(
+    cfg: ClientConfig,
+    tunnels: Vec<TunnelDef>,
+    no_reconnect: bool,
+    ui: UiArgs,
+) -> error::Result<()> {
+    let use_tui = !output::json_mode() && !ui.no_tui && std::io::stdout().is_terminal();
+    let use_inspector = !ui.no_inspect;
+
+    // HTTP is only parsed when something will actually display it.
+    let inspector = Inspector::new(
+        use_tui || use_inspector,
+        cfg.server.clone(),
+        cfg.region.clone(),
+    );
+    tui::set_log_sink(Arc::clone(&inspector));
+
+    if use_inspector {
+        match inspect::server::bind(ui.inspect_port).await {
+            Some((listener, url)) => {
+                inspector.set_inspect_url(url.clone());
+                // Human modes print this under the startup box / in the TUI
+                // header; JSON consumers get it as an event so the bound port
+                // is discoverable rather than invisible.
+                output::emit(&output::Event::InspectorReady { url });
+                tokio::spawn(inspect::server::serve(listener, Arc::clone(&inspector)));
+            }
+            None => warn!(
+                port = ui.inspect_port,
+                "no free port for the local inspector — continuing without it"
+            ),
+        }
+    }
+
+    // Without the terminal UI, requests still stream to stdout one line each.
+    if !use_tui && !output::json_mode() && inspector.capture_enabled() {
+        tokio::spawn(print_request_lines(inspector.subscribe()));
+    }
+
+    if !use_tui {
+        return run_tunnels(cfg, tunnels, no_reconnect, inspector).await;
+    }
+
+    // With the terminal UI, the session runs behind it. Whichever ends first
+    // stops the other: quitting the UI shuts the session down, and a session
+    // that dies wakes the UI so the terminal is restored before we report why.
+    let mut session = tokio::spawn({
+        let inspector = Arc::clone(&inspector);
+        async move {
+            let result = run_tunnels(cfg, tunnels, no_reconnect, Arc::clone(&inspector)).await;
+            inspector.set_status(SessionStatus::Closed);
+            inspector.request_shutdown();
+            result
+        }
+    });
+
+    let ui_result = tui::run(Arc::clone(&inspector)).await;
+    inspector.request_shutdown();
+
+    let session_result = match tokio::time::timeout(SHUTDOWN_GRACE, &mut session).await {
+        Ok(Ok(result)) => result,
+        // The task panicked or was cancelled; the UI already exited cleanly.
+        Ok(Err(_)) => Ok(()),
+        Err(_) => {
+            session.abort();
+            Ok(())
+        }
+    };
+
+    ui_result.map_err(error::Error::Io)?;
+    session_result
+}
+
+async fn run_tunnels(
+    cfg: ClientConfig,
+    tunnels: Vec<TunnelDef>,
+    no_reconnect: bool,
+    inspector: Arc<Inspector>,
+) -> error::Result<()> {
+    if no_reconnect {
+        control::connect(&cfg, &tunnels, &inspector).await
     } else {
-        reconnect::run_with_reconnect(cfg, tunnels).await
+        reconnect::run_with_reconnect(cfg, tunnels, inspector).await
+    }
+}
+
+/// Line-mode request log: one line per captured request, mirroring the terminal
+/// UI's request table for pipes, CI, and `--no-tui`.
+async fn print_request_lines(mut exchanges: tokio::sync::broadcast::Receiver<Arc<Exchange>>) {
+    loop {
+        match exchanges.recv().await {
+            Ok(exchange) => display::print_request(
+                &exchange.method,
+                &exchange.path,
+                exchange.status,
+                exchange.duration_ms,
+            ),
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => return,
+        }
     }
 }
 
@@ -325,11 +471,7 @@ async fn run_p2p(args: P2pArgs) -> error::Result<()> {
 
     let tunnels = vec![tunnel];
 
-    if args.no_reconnect {
-        control::connect(&cfg, &tunnels).await
-    } else {
-        reconnect::run_with_reconnect(cfg, tunnels).await
-    }
+    run_session(cfg, tunnels, args.no_reconnect, args.ui).await
 }
 
 async fn run_start(args: StartArgs) -> error::Result<()> {
@@ -355,7 +497,7 @@ async fn run_start(args: StartArgs) -> error::Result<()> {
     }
 
     let tunnels: Vec<TunnelDef> = cfg.tunnels.values().cloned().collect();
-    reconnect::run_with_reconnect(cfg, tunnels).await
+    run_session(cfg, tunnels, false, args.ui).await
 }
 
 async fn run_token(cmd: TokenCmd) -> error::Result<()> {
@@ -542,8 +684,10 @@ fn init_tracing() {
         )
         .with_target(false)
         // Diagnostics go to stderr so stdout stays clean for tunnel output
-        // (and valid NDJSON in --json mode).
-        .with_writer(std::io::stderr)
+        // (and valid NDJSON in --json mode). While the terminal UI owns the
+        // screen they are buffered for its log pane instead of corrupting it.
+        .with_writer(tui::LogWriter)
+        .with_ansi(std::io::stderr().is_terminal())
         .compact()
         .init();
 }

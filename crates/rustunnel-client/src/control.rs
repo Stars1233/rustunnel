@@ -51,6 +51,8 @@ use rustunnel_protocol::{decode_frame, encode_frame, ControlFrame, TunnelProtoco
 use crate::config::{ClientConfig, TunnelDef};
 use crate::display::{self, TunnelDisplay};
 use crate::error::{Error, Result};
+use crate::inspect::tap::ConnTap;
+use crate::inspect::{Inspector, SessionStatus, TunnelInfo};
 use crate::output;
 use crate::proxy;
 
@@ -228,8 +230,14 @@ type DataConn = Connection<WsCompat<MaybeTlsStream<tokio::net::TcpStream>>>;
 /// main event loop until the connection closes or Ctrl-C is pressed.
 ///
 /// Returns `Ok(())` on a clean exit and `Err(_)` on any unrecoverable error.
-pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()> {
+pub async fn connect(
+    config: &ClientConfig,
+    tunnels: &[TunnelDef],
+    inspector: &Arc<Inspector>,
+) -> Result<()> {
     let sp = display::spinner("Connecting to tunnel server…");
+    inspector.set_status(SessionStatus::Connecting);
+    inspector.set_server(config.server.clone());
 
     // 1. Control WebSocket —————————————————————————————————————————————————
     let ctrl_url = format!("wss://{}/_control", config.server);
@@ -512,9 +520,33 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         warn!("data WebSocket unavailable — proxy connections will be skipped");
     }
 
-    // 5. Print startup display ————————————————————————————————————————————
-    //    Human mode: startup box. JSON mode: one NDJSON `tunnel_ready` event
-    //    per tunnel (preceded by `reconnected` when this is a re-connect).
+    // 5. Publish state + print startup display ————————————————————————————
+    //    The UIs (terminal + web inspector) read the tunnel list from the
+    //    inspector, so populate it before deciding what to print.
+    inspector.set_tunnels(
+        registered
+            .iter()
+            .map(|(t, url)| TunnelInfo {
+                name: tunnel_label(t),
+                proto: t.proto.clone(),
+                local: format!("{}:{}", t.local_host, t.local_port),
+                public_url: if url.is_empty() {
+                    match &t.p2p_target {
+                        Some(target) => format!("p2p://{target}"),
+                        None => String::new(),
+                    }
+                } else {
+                    url.clone()
+                },
+                healthy: None,
+            })
+            .collect(),
+    );
+    inspector.set_status(SessionStatus::Online);
+
+    //    Human mode: startup box (unless the terminal UI owns the screen).
+    //    JSON mode: one NDJSON `tunnel_ready` event per tunnel (preceded by
+    //    `reconnected` when this is a re-connect).
     if output::json_mode() {
         if output::take_reconnect_pending() {
             output::emit(&output::Event::Reconnected);
@@ -539,7 +571,7 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
                 t.subdomain.clone().or_else(|| t.p2p_name.clone()),
             ));
         }
-    } else {
+    } else if !crate::tui::active() {
         let display_tunnels: Vec<TunnelDisplay> = registered
             .iter()
             .map(|(t, url)| TunnelDisplay {
@@ -550,6 +582,9 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
             })
             .collect();
         display::print_startup_box(&display_tunnels);
+        if let Some(url) = inspector.session().inspect_url {
+            display::print_inspect_url(&url);
+        }
     }
 
     // 6. Spawn health-probe tasks for tunnels with a health_check ─────────
@@ -603,8 +638,59 @@ pub async fn connect(config: &ClientConfig, tunnels: &[TunnelDef]) -> Result<()>
         p2p_accept_rx,
         p2p_sub_info,
         outbound_frame_rx,
+        inspector,
     )
     .await
+}
+
+/// Display name for a tunnel: its subdomain, P2P name, or a generic fallback.
+fn tunnel_label(def: &TunnelDef) -> String {
+    def.subdomain
+        .clone()
+        .or_else(|| def.p2p_name.clone())
+        .or_else(|| def.p2p_target.clone())
+        .unwrap_or_else(|| "tunnel".into())
+}
+
+/// Everything needed to proxy one inbound connection.
+struct ConnMeta {
+    local_addr: String,
+    protocol: TunnelProtocol,
+    client_addr: String,
+    tunnel_label: String,
+}
+
+/// Start the proxy task for one connection, tapping it when the tunnel carries
+/// HTTP and inspection is enabled.
+fn spawn_proxy(meta: ConnMeta, stream: YamuxStream, conn_id: Uuid, inspector: &Arc<Inspector>) {
+    if meta.protocol == TunnelProtocol::Udp {
+        tokio::spawn(proxy::proxy_udp_connection(
+            stream,
+            meta.local_addr,
+            conn_id,
+            Arc::clone(inspector),
+        ));
+        return;
+    }
+
+    // Only HTTP tunnels carry parseable traffic; TCP stays a raw byte pipe.
+    let is_http = matches!(meta.protocol, TunnelProtocol::Http | TunnelProtocol::Https);
+    let tap = (is_http && inspector.capture_enabled()).then(|| {
+        ConnTap::new(
+            Arc::clone(inspector),
+            meta.tunnel_label,
+            conn_id,
+            meta.client_addr,
+        )
+    });
+
+    tokio::spawn(proxy::proxy_connection(
+        stream,
+        meta.local_addr,
+        conn_id,
+        Arc::clone(inspector),
+        tap,
+    ));
 }
 
 // ── main loop ─────────────────────────────────────────────────────────────────
@@ -620,6 +706,7 @@ async fn main_loop(
     mut p2p_accept_rx: Option<mpsc::Receiver<tokio::net::TcpStream>>,
     p2p_sub_info: Option<(String, String, Vec<u8>)>, // (target_name, secret_hash, raw_secret)
     mut outbound_frame_rx: mpsc::Receiver<ControlFrame>,
+    inspector: &Arc<Inspector>,
 ) -> Result<()> {
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await; // skip the immediate first tick
@@ -630,7 +717,7 @@ async fn main_loop(
     // Pending maps to handle the two orderings of NewConnection vs stream:
     //   pending_conns:   NewConnection arrived first  → wait for matching stream
     //   pending_streams: stream arrived first         → wait for matching NewConnection
-    let mut pending_conns: std::collections::HashMap<Uuid, (String, TunnelProtocol)> =
+    let mut pending_conns: std::collections::HashMap<Uuid, ConnMeta> =
         std::collections::HashMap::new();
     let mut pending_streams: std::collections::HashMap<Uuid, YamuxStream> =
         std::collections::HashMap::new();
@@ -670,8 +757,17 @@ async fn main_loop(
             }
 
             // ── Ctrl-C / SIGTERM ──────────────────────────────────────────
+            //    In TUI mode the terminal is in raw mode, so no SIGINT is
+            //    generated — the UI's quit key drives the shutdown arm below.
             _ = tokio::signal::ctrl_c() => {
                 info!("received interrupt — shutting down");
+                let _ = ctrl_ws.close(None).await;
+                return Ok(());
+            }
+
+            // ── Shutdown requested by the terminal UI ─────────────────────
+            _ = inspector.shutdown_signal() => {
+                info!("shutdown requested — closing session");
                 let _ = ctrl_ws.close(None).await;
                 return Ok(());
             }
@@ -691,6 +787,16 @@ async fn main_loop(
             //    TunnelUnhealthy frames here. The select arm serialises all
             //    writes to the WS — probe tasks never touch ctrl_ws directly.
             Some(frame) = outbound_frame_rx.recv() => {
+                // Mirror health transitions into the UIs on the way past.
+                match &frame {
+                    ControlFrame::TunnelHealthy { tunnel_id } => {
+                        note_health(registered, inspector, *tunnel_id, true);
+                    }
+                    ControlFrame::TunnelUnhealthy { tunnel_id, .. } => {
+                        note_health(registered, inspector, *tunnel_id, false);
+                    }
+                    _ => {}
+                }
                 send_frame(ctrl_ws, &frame).await?;
             }
 
@@ -702,14 +808,12 @@ async fn main_loop(
                         // already-accepted local TCP connection.
                         if let Some(local_tcp) = p2p_local_streams.remove(&conn_id) {
                             debug!(%conn_id, "P2P subscriber: bridging local TCP ↔ yamux");
-                            tokio::spawn(proxy::proxy_p2p_relay(stream, local_tcp, conn_id));
-                        } else if let Some((local_addr, protocol)) = pending_conns.remove(&conn_id) {
+                            tokio::spawn(proxy::proxy_p2p_relay(
+                                stream, local_tcp, conn_id, Arc::clone(inspector),
+                            ));
+                        } else if let Some(meta) = pending_conns.remove(&conn_id) {
                             // NewConnection arrived earlier — proxy immediately.
-                            if protocol == TunnelProtocol::Udp {
-                                tokio::spawn(proxy::proxy_udp_connection(stream, local_addr, conn_id));
-                            } else {
-                                tokio::spawn(proxy::proxy_connection(stream, local_addr, conn_id));
-                            }
+                            spawn_proxy(meta, stream, conn_id, inspector);
                         } else {
                             // NewConnection hasn't arrived yet — stash the stream.
                             debug!(%conn_id, "stream arrived before NewConnection — buffering");
@@ -776,26 +880,23 @@ async fn main_loop(
                                     continue;
                                 }
 
-                                match find_local_addr(registered, &protocol) {
+                                match find_local_target(registered, &protocol) {
                                     None => {
                                         warn!(%conn_id, ?protocol,
                                             "no local address configured for protocol");
                                     }
-                                    Some(local_addr) => {
-                                        let is_udp = protocol == TunnelProtocol::Udp;
+                                    Some((local_addr, tunnel_label)) => {
+                                        let meta = ConnMeta {
+                                            local_addr,
+                                            protocol,
+                                            client_addr: client_addr.clone(),
+                                            tunnel_label,
+                                        };
                                         if let Some(stream) = pending_streams.remove(&conn_id) {
-                                            if is_udp {
-                                                tokio::spawn(proxy::proxy_udp_connection(
-                                                    stream, local_addr, conn_id,
-                                                ));
-                                            } else {
-                                                tokio::spawn(proxy::proxy_connection(
-                                                    stream, local_addr, conn_id,
-                                                ));
-                                            }
+                                            spawn_proxy(meta, stream, conn_id, inspector);
                                         } else {
                                             debug!(%conn_id, "NewConnection arrived before stream — buffering");
-                                            pending_conns.insert(conn_id, (local_addr, protocol));
+                                            pending_conns.insert(conn_id, meta);
                                         }
                                     }
                                 }
@@ -810,7 +911,9 @@ async fn main_loop(
                                     // Check if yamux stream already arrived.
                                     if let Some(yamux) = pending_streams.remove(&conn_id) {
                                         debug!(%conn_id, "P2P: yamux already arrived — bridging");
-                                        tokio::spawn(proxy::proxy_p2p_relay(yamux, local, conn_id));
+                                        tokio::spawn(proxy::proxy_p2p_relay(
+                                            yamux, local, conn_id, Arc::clone(inspector),
+                                        ));
                                     } else {
                                         p2p_local_streams.insert(conn_id, local);
                                     }
@@ -868,9 +971,11 @@ async fn main_loop(
                                 send_frame(ctrl_ws, &ControlFrame::Pong { timestamp }).await?;
                             }
 
-                            ControlFrame::Pong { .. } => {
+                            ControlFrame::Pong { timestamp } => {
                                 awaiting_pong = false;
                                 last_pong = tokio::time::Instant::now();
+                                // Round-trip to the edge, shown as live latency.
+                                inspector.set_latency(now_ms().saturating_sub(timestamp));
                             }
 
                             other => {
@@ -1010,13 +1115,13 @@ fn health_check_to_wire(
     })
 }
 
-/// Find the local address string (`"host:port"`) for a registered tunnel
-/// matching `protocol`.  Returns a raw string so that `TcpStream::connect`
-/// can perform DNS resolution (e.g. for `localhost`).
-fn find_local_addr(
+/// Find the local address (`"host:port"`) and display label of the registered
+/// tunnel matching `protocol`.  The address stays a raw string so that
+/// `TcpStream::connect` can perform DNS resolution (e.g. for `localhost`).
+fn find_local_target(
     registered: &[(TunnelDef, String)],
     protocol: &TunnelProtocol,
-) -> Option<String> {
+) -> Option<(String, String)> {
     for (def, _) in registered {
         let matches = match protocol {
             TunnelProtocol::Http | TunnelProtocol::Https => {
@@ -1027,10 +1132,29 @@ fn find_local_addr(
             TunnelProtocol::P2p => def.proto == "p2p",
         };
         if matches {
-            return Some(format!("{}:{}", def.local_host, def.local_port));
+            return Some((
+                format!("{}:{}", def.local_host, def.local_port),
+                tunnel_label(def),
+            ));
         }
     }
     None
+}
+
+/// Reflect a health-probe transition into the UIs, keyed by the tunnel's local
+/// address (what the UI tunnel list is keyed on).
+fn note_health(
+    registered: &[(TunnelDef, String)],
+    inspector: &Arc<Inspector>,
+    tunnel_id: Uuid,
+    healthy: bool,
+) {
+    for (def, _) in registered {
+        if def.registered_tunnel_id == Some(tunnel_id) {
+            inspector.set_tunnel_health(&format!("{}:{}", def.local_host, def.local_port), healthy);
+            return;
+        }
+    }
 }
 
 async fn send_frame(ws: &mut CtrlWs, frame: &ControlFrame) -> Result<()> {

@@ -7,6 +7,7 @@
 //! Delay schedule:
 //!   initial = 1 s, multiplier = 2×, max = 60 s, jitter = ±20 %
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
@@ -15,6 +16,7 @@ use tracing::{info, warn};
 use crate::config::{ClientConfig, TunnelDef};
 use crate::control;
 use crate::error::{Error, Result};
+use crate::inspect::{Inspector, SessionStatus};
 use crate::output;
 
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -27,33 +29,46 @@ const JITTER: f64 = 0.20; // ±20 %
 /// Returns `Ok(())` when the connection ends cleanly (e.g. Ctrl-C) and
 /// `Err(_)` on a fatal, non-retryable error (auth or tunnel-registration
 /// rejection).
-pub async fn run_with_reconnect(config: ClientConfig, tunnels: Vec<TunnelDef>) -> Result<()> {
+pub async fn run_with_reconnect(
+    config: ClientConfig,
+    tunnels: Vec<TunnelDef>,
+    inspector: Arc<Inspector>,
+) -> Result<()> {
     let mut delay = INITIAL_DELAY;
     let mut attempt: u32 = 0;
     let mut last_error = String::new();
 
     loop {
+        if inspector.shutdown_requested() {
+            return Ok(());
+        }
+
         if attempt > 0 {
             output::note_reconnecting();
+            inspector.set_status(SessionStatus::Reconnecting { attempt });
             if output::json_mode() {
                 output::emit(&output::Event::Reconnecting {
                     attempt,
                     reason: last_error.clone(),
                     delay_secs: delay.as_secs_f64(),
                 });
-            } else {
+            } else if !crate::tui::active() {
                 eprintln!(
                     "  Reconnecting in {:.1}s (attempt {attempt})…",
                     delay.as_secs_f64()
                 );
             }
-            tokio::time::sleep(delay).await;
+            // A backoff wait must not delay a shutdown the user already asked for.
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = inspector.shutdown_signal() => return Ok(()),
+            }
             delay = next_delay(delay);
         }
 
         info!(attempt, "connecting to tunnel server");
 
-        match control::connect(&config, &tunnels).await {
+        match control::connect(&config, &tunnels, &inspector).await {
             Ok(()) => {
                 // Clean exit (e.g. Ctrl-C) — stop retrying.
                 info!("connection closed cleanly");

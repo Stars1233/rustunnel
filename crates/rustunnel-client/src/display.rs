@@ -69,8 +69,20 @@ pub fn print_startup_box(tunnels: &[TunnelDisplay]) {
     println!();
 }
 
+/// Print the local inspector URL under the startup box.
+pub fn print_inspect_url(url: &str) {
+    println!(
+        "  {} {}",
+        style("Inspect").dim(),
+        style(url).cyan().underlined()
+    );
+    println!();
+}
+
 /// Print a single proxied request line (timestamp | method | path | status | duration).
-#[allow(dead_code)]
+///
+/// Used in line mode — when the terminal UI is off (`--no-tui`, piped output),
+/// requests still stream to stdout instead of vanishing.
 pub fn print_request(method: &str, path: &str, status: u16, duration_ms: u64) {
     let ts = Local::now().format("%H:%M:%S").to_string();
     let ts_str = style(ts).dim();
@@ -113,9 +125,10 @@ pub fn print_request(method: &str, path: &str, status: u16, duration_ms: u64) {
 }
 
 /// Create a spinner for an in-progress operation (e.g. connecting).
-/// Hidden in `--json` mode so output stays machine-readable.
+/// Hidden in `--json` mode so output stays machine-readable, and while the
+/// terminal UI owns the screen.
 pub fn spinner(msg: &str) -> ProgressBar {
-    if crate::output::json_mode() {
+    if crate::output::json_mode() || crate::tui::active() {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new_spinner();

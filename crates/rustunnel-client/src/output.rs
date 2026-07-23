@@ -5,6 +5,7 @@
 //! self-contained event object with an `"event"` discriminator field:
 //!
 //! ```json
+//! {"event":"inspector_ready","url":"http://127.0.0.1:4040"}
 //! {"event":"tunnel_ready","protocol":"http","public_url":"https://x.example.com","local_port":3000,...}
 //! {"event":"reconnecting","attempt":1,"reason":"connection error: ...","delay_secs":1.0}
 //! {"event":"reconnected"}
@@ -51,6 +52,10 @@ pub fn take_reconnect_pending() -> bool {
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    /// The local request inspector is listening. Emitted once at startup,
+    /// before any `tunnel_ready`, and omitted entirely with `--no-inspect` —
+    /// so the listening port is never a silent side effect in automation.
+    InspectorReady { url: String },
     /// A tunnel is registered and ready to receive traffic.
     /// `public_url` is always set; `public_addr` (host:port) is additionally
     /// set for tcp/udp tunnels.
@@ -193,6 +198,17 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         assert_eq!(v["public_addr"], "edge.rustunnel.com:30001");
+    }
+
+    #[test]
+    fn inspector_ready_event_shape() {
+        let ev = Event::InspectorReady {
+            url: "http://127.0.0.1:4040".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"event":"inspector_ready","url":"http://127.0.0.1:4040"}"#
+        );
     }
 
     #[test]
