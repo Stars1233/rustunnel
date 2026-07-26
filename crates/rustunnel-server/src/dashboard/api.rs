@@ -1401,6 +1401,18 @@ struct AdminUsersQuery {
     #[serde(default)]
     offset: i64,
     search: Option<String>,
+    /// Effective plan, e.g. "free" | "payg". Churned paid users match "free".
+    plan: Option<String>,
+    /// "google" | "password".
+    auth_method: Option<String>,
+    /// User account status, e.g. "active" | "banned".
+    status: Option<String>,
+    /// Only users who were on a paid plan and have since canceled.
+    #[serde(default)]
+    previously_paid: bool,
+    /// "created" (default) | "last_active" | "email". Unknown values fall back
+    /// to the default rather than erroring.
+    sort: Option<String>,
 }
 
 fn default_admin_limit() -> i64 {
@@ -1423,10 +1435,22 @@ async fn admin_list_users(
         return e.into_response();
     }
 
-    let search = q.search.as_deref();
+    let filters = db::AdminUserFilters {
+        search: q.search.as_deref(),
+        plan: q.plan.as_deref(),
+        auth_method: q.auth_method.as_deref(),
+        status: q.status.as_deref(),
+        previously_paid: q.previously_paid,
+    };
+    let sort = q
+        .sort
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+
     let (users, total) = tokio::join!(
-        db::list_admin_users(&state.db.pg, q.limit, q.offset, search),
-        db::count_admin_users(&state.db.pg, search),
+        db::list_admin_users(&state.db.pg, q.limit, q.offset, filters, sort),
+        db::count_admin_users(&state.db.pg, filters),
     );
     match (users, total) {
         (Ok(users), Ok(total)) => Json(AdminUsersResponse { users, total }).into_response(),

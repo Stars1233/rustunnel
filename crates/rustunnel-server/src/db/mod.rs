@@ -346,74 +346,179 @@ pub struct AdminUser {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Number of API tokens belonging to this user.
     pub token_count: i64,
-    /// Name of the user's current plan (e.g. "free", "payg", "pro"), if any.
+    /// The user's *effective* plan. A canceled subscription drops the user back
+    /// to "free", so this reads "free" even though the underlying row still
+    /// points at the paid plan they used to be on.
     pub plan_name: Option<String>,
-    /// Status of the user's current subscription (e.g. "active", "past_due"), if any.
+    /// Raw status of the user's latest subscription ("active", "past_due",
+    /// "canceled", …). Kept separate from `plan_name` so the UI can show both
+    /// "free" and *why* it is free.
     pub subscription_status: Option<String>,
+    /// The paid plan this user churned off, set only once they have canceled a
+    /// non-free plan. `None` for users who never paid. Drives win-back filters.
+    pub previous_plan_name: Option<String>,
+    /// When the paid subscription ended.
+    pub canceled_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Most recent use across all of the user's tokens.
+    pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Paginated list of all users (newest first).
+/// Optional filters for the admin user list.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AdminUserFilters<'a> {
+    /// Case-insensitive substring match on email.
+    pub search: Option<&'a str>,
+    /// Match on *effective* plan, so "free" also matches churned paid users.
+    pub plan: Option<&'a str>,
+    /// "google" | "password".
+    pub auth_method: Option<&'a str>,
+    /// User account status, e.g. "active" | "banned".
+    pub status: Option<&'a str>,
+    /// Only users who were on a paid plan and have since canceled.
+    pub previously_paid: bool,
+}
+
+/// Sort orders accepted by the admin user list.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum AdminUserSort {
+    /// Newest signups first.
+    #[default]
+    Created,
+    /// Most recently active first; users who never used a token sort last.
+    LastActive,
+    /// Alphabetical by email.
+    Email,
+}
+
+impl AdminUserSort {
+    /// Fixed ORDER BY clause. Never interpolates caller input.
+    fn order_by(self) -> &'static str {
+        match self {
+            Self::Created => "ORDER BY u.created_at DESC",
+            Self::LastActive => "ORDER BY tc.last_active_at DESC NULLS LAST, u.created_at DESC",
+            Self::Email => "ORDER BY u.email ASC",
+        }
+    }
+}
+
+impl std::str::FromStr for AdminUserSort {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "created" => Ok(Self::Created),
+            "last_active" => Ok(Self::LastActive),
+            "email" => Ok(Self::Email),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The user's most recent subscription, with the plan joined in.
+///
+/// Effective plan has to be *derived* rather than read: subscribing UPGRADES
+/// the existing free row in place (see platform-api `billing::subscribe`), so
+/// once that row is canceled there is no surviving free row to fall back to.
+/// "free" is synthesised in the projection below.
+const SUB_LATERAL: &str = "
+    LEFT JOIN LATERAL (
+        SELECT p.name AS plan_name, p.billing_model, s.status, s.canceled_at
+          FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+         WHERE s.user_id = u.id
+         ORDER BY s.created_at DESC
+         LIMIT 1
+    ) sub ON TRUE";
+
+/// Token count and last-activity, as a lateral so no GROUP BY is needed.
+const TOKEN_LATERAL: &str = "
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::bigint AS token_count, MAX(t.last_used_at) AS last_active_at
+          FROM tokens t WHERE t.user_id = u.id
+    ) tc ON TRUE";
+
+/// Projection shared by the list and detail queries.
+const ADMIN_USER_COLS: &str = "
+    u.id, u.email, u.display_name, u.email_verified, u.status, u.auth_method, u.created_at,
+    tc.token_count,
+    CASE WHEN sub.status = 'canceled' THEN 'free' ELSE sub.plan_name END AS plan_name,
+    sub.status AS subscription_status,
+    CASE WHEN sub.status = 'canceled' AND sub.billing_model <> 'free'
+         THEN sub.plan_name END AS previous_plan_name,
+    CASE WHEN sub.status = 'canceled' THEN sub.canceled_at END AS canceled_at,
+    tc.last_active_at";
+
+/// Filter predicates. Bind order: $1 search, $2 plan, $3 auth_method,
+/// $4 status, $5 previously_paid.
+const ADMIN_USER_FILTERS: &str = "
+    WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
+      AND ($2::text IS NULL OR (CASE WHEN sub.status = 'canceled'
+                                     THEN 'free' ELSE sub.plan_name END) = $2)
+      AND ($3::text IS NULL OR u.auth_method = $3)
+      AND ($4::text IS NULL OR u.status = $4)
+      AND ($5::bool IS NOT TRUE OR (sub.status = 'canceled'
+                                    AND sub.billing_model <> 'free'))";
+
+/// Paginated, filterable list of users.
 pub async fn list_admin_users(
     pool: &PgPool,
     limit: i64,
     offset: i64,
-    search: Option<&str>,
+    filters: AdminUserFilters<'_>,
+    sort: AdminUserSort,
 ) -> Result<Vec<AdminUser>> {
-    let rows: Vec<AdminUser> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.auth_method, u.created_at,
-                COUNT(t.id)::bigint AS token_count,
-                (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-                 WHERE s.user_id = u.id AND s.status != 'canceled'
-                 ORDER BY s.created_at DESC LIMIT 1) AS plan_name,
-                (SELECT s.status FROM subscriptions s
-                 WHERE s.user_id = u.id AND s.status != 'canceled'
-                 ORDER BY s.created_at DESC LIMIT 1) AS subscription_status
-         FROM users u
-         LEFT JOIN tokens t ON t.user_id = u.id
-         WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
-         GROUP BY u.id
-         ORDER BY u.created_at DESC
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(search)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "SELECT {cols} FROM users u {tokens} {sub} {filters} {order} LIMIT $6 OFFSET $7",
+        cols = ADMIN_USER_COLS,
+        tokens = TOKEN_LATERAL,
+        sub = SUB_LATERAL,
+        filters = ADMIN_USER_FILTERS,
+        order = sort.order_by(),
+    );
+    let rows: Vec<AdminUser> = sqlx::query_as(&sql)
+        .bind(filters.search)
+        .bind(filters.plan)
+        .bind(filters.auth_method)
+        .bind(filters.status)
+        .bind(filters.previously_paid)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
-/// Total user count (for pagination).
-pub async fn count_admin_users(pool: &PgPool, search: Option<&str>) -> Result<i64> {
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*)::bigint FROM users \
-         WHERE ($1::text IS NULL OR email ILIKE '%' || $1 || '%')",
-    )
-    .bind(search)
-    .fetch_one(pool)
-    .await?;
+/// Total user count matching the same filters (for pagination).
+///
+/// Keeps the subscription lateral so the plan/previously-paid filters mean the
+/// same thing here as they do in `list_admin_users`.
+pub async fn count_admin_users(pool: &PgPool, filters: AdminUserFilters<'_>) -> Result<i64> {
+    let sql = format!(
+        "SELECT COUNT(*)::bigint FROM users u {sub} {filters}",
+        sub = SUB_LATERAL,
+        filters = ADMIN_USER_FILTERS,
+    );
+    let (count,): (i64,) = sqlx::query_as(&sql)
+        .bind(filters.search)
+        .bind(filters.plan)
+        .bind(filters.auth_method)
+        .bind(filters.status)
+        .bind(filters.previously_paid)
+        .fetch_one(pool)
+        .await?;
     Ok(count)
 }
 
-/// Single user detail with their token list.
+/// Single user detail.
 pub async fn get_admin_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<AdminUser>> {
-    let row: Option<AdminUser> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, u.email_verified, u.status, u.auth_method, u.created_at,
-                COUNT(t.id)::bigint AS token_count,
-                (SELECT p.name FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-                 WHERE s.user_id = u.id AND s.status != 'canceled'
-                 ORDER BY s.created_at DESC LIMIT 1) AS plan_name,
-                (SELECT s.status FROM subscriptions s
-                 WHERE s.user_id = u.id AND s.status != 'canceled'
-                 ORDER BY s.created_at DESC LIMIT 1) AS subscription_status
-         FROM users u
-         LEFT JOIN tokens t ON t.user_id = u.id
-         WHERE u.id = $1
-         GROUP BY u.id",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!(
+        "SELECT {cols} FROM users u {tokens} {sub} WHERE u.id = $1",
+        cols = ADMIN_USER_COLS,
+        tokens = TOKEN_LATERAL,
+        sub = SUB_LATERAL,
+    );
+    let row: Option<AdminUser> = sqlx::query_as(&sql)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
