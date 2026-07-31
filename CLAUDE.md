@@ -8,7 +8,7 @@ rustunnel is a self-hosted secure tunnel server written in Rust (similar to ngro
 
 ## Parent project
 
-**Parent project:** [rustunnel](/Users/joaoh82/projects/rustunnel/CLAUDE.md) — read for shared dev commands, env vars, and cross-service architecture.
+**Parent project:** [rustunnel](/Users/joaoh82/projects/rustunnel/CLAUDE.md) — read for shared dev commands, env vars, cross-service architecture, **and the global working guidelines** (never-touch-main, task management, pull-request registration, reserved ports, engineering defaults). Those guideline sections live only in the parent `CLAUDE.md` — this file does not duplicate them.
 
 ### How I fit in
 
@@ -16,12 +16,12 @@ This crate (`rustunnel/`) is the **core tunnel server + CLI client + MCP server*
 
 | Sibling | Stack | Dev port | Role |
 |---------|-------|----------|------|
-| `rustunnel-web/` | Rust (Axum) + Next.js 15 | 3001 / 3000 | Platform API + public website (registration, JWT, billing) |
+| `rustunnel-web/` | Rust (Axum) + Next.js 15 | 3001 / 3000 | Platform API + public website + marketing pages (registration, JWT, billing) |
 | `rustunnel-admin-dashboard/` | Next.js 14 | 3002 | Internal admin UI |
-| `rustunnel-landing/` | Next.js 15 | 3000 | Marketing landing |
 | `rustunnel-private/` | Markdown / Bash / Ansible | — | Ops docs, provisioning playbooks |
 | `docs/` | Mintlify (MDX) | 3000 | Public documentation |
 | `homebrew-rustunnelcli/` | Ruby | — | Homebrew tap formula |
+| `rustunnel-status/` | Upptime (YAML + Actions) | — | `status.rustunnel.com`, probes every edge |
 
 This server shares its **PostgreSQL database** with `rustunnel-web/platform-api` (the `tokens` table is the auth boundary). Edge servers (`eu`, `us`, `ap`) all run this binary; `platform-api` runs on a separate VPS at `api.rustunnel.com`.
 
@@ -187,6 +187,7 @@ All client↔server signaling uses JSON-serialized `ControlFrame` over WebSocket
 
 - **Local dev:** `deploy/local/server.toml` — self-signed certs, `require_auth = false`, PostgreSQL at `localhost:5432`
 - **Production template:** `deploy/server.toml` — Let's Encrypt + wildcard DNS, PostgreSQL, full rate limits
+- **`plain_http_mode`** (port 80 behaviour) — `"proxy"` serves tunnel subdomains over plain HTTP with `X-Forwarded-Proto: http` (ngrok parity; required for HMAC-signed webhooks configured with an `http://` URL, e.g. Twilio) and 308-redirects everything else; `"redirect"` (the code default) 308s every request. All three edges run `"proxy"` — the live per-region files are `../rustunnel-private/scripts/config/server.{eu,us,ap}.toml`
 - **Client config:** `~/.rustunnel/config.yml` (managed via `rustunnel setup` wizard)
 
 ## Observability

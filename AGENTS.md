@@ -1,9 +1,16 @@
 # AGENTS.md
 
-Guidance for AI agents working in or with this repository.
+> **`CLAUDE.md` in this directory is the source of truth.** Read it in full
+> before doing any work here — it contains the working guidelines (git/branch
+> rules, knowledge base, task management, pull-request registration, reserved
+> ports, engineering defaults) and points to the parent `rustunnel` `CLAUDE.md`
+> for the rest. If anything in this file conflicts with `CLAUDE.md`,
+> `CLAUDE.md` wins.
 
-> Building/working **on** this codebase? See [`CLAUDE.md`](./CLAUDE.md) for build,
-> test, and lint commands and the architecture overview.
+The rest of this file is about using rustunnel **as a tool** from an agent
+session — it does not describe how to build or change this codebase. For build,
+test, and lint commands and the architecture overview, see
+[`CLAUDE.md`](./CLAUDE.md).
 
 ## Using rustunnel as a tool (expose local services)
 
