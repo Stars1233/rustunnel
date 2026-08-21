@@ -3,7 +3,7 @@
 [![CI](https://github.com/joaoh82/rustunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/joaoh82/rustunnel/actions/workflows/ci.yml)
 [![License: AGPLv3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.76%2B-orange.svg)](https://www.rust-lang.org)
-[![smithery badge](https://smithery.ai/badge/joaoh82/rustunnel)](https://smithery.ai/servers/joaoh82/rustunnel)
+[![Listed on Skillselion](https://skillselion.com/badge/mcp/tool/io.github.joaoh82/rustunnel.svg)](https://skillselion.com/mcp/tool/io.github.joaoh82/rustunnel)
 
 ![rustunnel logo](images/rustunnel-logo-light.png)
 
