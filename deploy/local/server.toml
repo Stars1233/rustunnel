@@ -16,6 +16,8 @@ key_path  = "/tmp/rustunnel-dev/key.pem"
 [auth]
 admin_token  = "dev-secret-change-me"
 require_auth = false
+# Failed auth attempts per source IP per minute before rejection (0 = off).
+max_failed_auth_per_minute = 10
 
 [database]
 # Local PostgreSQL started with: make db-start

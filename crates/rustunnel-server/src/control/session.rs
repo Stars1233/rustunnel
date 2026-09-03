@@ -28,6 +28,7 @@ use rustunnel_protocol::{decode_frame, encode_frame, ControlFrame, TunnelProtoco
 use chrono::Utc;
 
 use crate::audit::{AuditEvent, AuditTx};
+use crate::auth::secret_eq;
 use crate::config::ServerConfig;
 use crate::control::mux::MuxSession;
 use crate::core::{ControlMessage, TunnelCore};
@@ -210,6 +211,24 @@ where
         }
     };
 
+    // Throttle before touching any secret: a peer that has burned through its
+    // failed-attempt budget never reaches the token comparison.
+    if core.auth_limiter.is_limited(peer_addr.ip()) {
+        let _ = send_frame(
+            &mut ws,
+            &ControlFrame::AuthError {
+                message: "too many failed auth attempts".into(),
+            },
+        )
+        .await;
+        let _ = audit_tx.try_send(AuditEvent::AuthAttempt {
+            peer: peer_addr.to_string(),
+            success: false,
+            token_id: None,
+        });
+        return Err(Error::Auth("auth throttled".into()));
+    }
+
     // Resolve auth and capture the full DB token record for limit enforcement.
     // Admin token → None; DB token → Some(Token).
     let db_token: Option<Token>;
@@ -219,7 +238,7 @@ where
         // Auth disabled — still try to resolve the DB token for tracking.
         db_token = db::verify_token(&db.pg, &token).await.ok().flatten();
         authed = true;
-    } else if token == config.auth.admin_token {
+    } else if secret_eq(&token, &config.auth.admin_token) {
         db_token = None;
         authed = true;
     } else {
@@ -236,6 +255,7 @@ where
     }
 
     if !authed {
+        core.auth_limiter.record_failure(peer_addr.ip());
         let _ = send_frame(
             &mut ws,
             &ControlFrame::AuthError {

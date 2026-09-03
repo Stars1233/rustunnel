@@ -195,3 +195,118 @@ async fn dashboard_token_crud_works() {
         "deleted token must not appear in list"
     );
 }
+
+// ── 7. Failed-auth throttle — control plane ──────────────────────────────────
+//
+// `auth.max_failed_auth_per_minute` (10 in the harness) caps failed `Auth`
+// frames per source IP. Once exhausted, the server rejects *before* comparing
+// the token, so even the correct admin token is refused until the window
+// slides. Every test gets its own server, so 127.0.0.1's budget is private
+// to this test.
+
+#[tokio::test]
+async fn control_plane_throttles_after_repeated_failures() {
+    init_tracing();
+    let server = TestServer::start().await;
+    let budget = server.config.auth.max_failed_auth_per_minute;
+
+    for i in 0..budget {
+        let err = TestClient::connect_expect_auth_error(&server, "wrong-token")
+            .await
+            .expect("should receive AuthError frame");
+        assert_eq!(
+            err, "invalid token",
+            "attempt {i} should be a plain rejection"
+        );
+    }
+
+    // Budget exhausted: the next bad attempt is refused outright …
+    let err = TestClient::connect_expect_auth_error(&server, "wrong-token")
+        .await
+        .expect("should receive AuthError frame");
+    assert_eq!(err, "too many failed auth attempts");
+
+    // … and so is the *correct* token from the same source — the throttle
+    // sits in front of the comparison, not behind it.
+    let err = TestClient::connect_expect_auth_error(&server, &server.admin_token)
+        .await
+        .expect("throttled peer should receive AuthError even with the right token");
+    assert_eq!(err, "too many failed auth attempts");
+}
+
+// ── 8. Failed-auth throttle — dashboard API ──────────────────────────────────
+
+#[tokio::test]
+async fn dashboard_throttles_failed_bearer_attempts() {
+    init_tracing();
+    let server = TestServer::start().await;
+    let base = format!("http://127.0.0.1:{}", server.dashboard_port);
+    let client = insecure_http_client();
+    let budget = server.config.auth.max_failed_auth_per_minute;
+
+    for i in 0..budget {
+        let resp = client
+            .get(format!("{base}/api/tunnels"))
+            .header("Authorization", "Bearer wrong-token")
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 401, "attempt {i} should be a plain 401");
+    }
+
+    // Over budget: 429 for a bad token …
+    let resp = client
+        .get(format!("{base}/api/tunnels"))
+        .header("Authorization", "Bearer wrong-token")
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 429);
+    let body: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(body["error"], "too many failed auth attempts");
+
+    // … and for the correct admin token from the same source.
+    let resp = client
+        .get(format!("{base}/api/tunnels"))
+        .header("Authorization", format!("Bearer {}", server.admin_token))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 429);
+
+    // Public endpoints carry no Authorization header and are never throttled.
+    let resp = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+}
+
+/// A request with no `Authorization` header at all is not a credential guess
+/// and must not eat into the budget.
+#[tokio::test]
+async fn dashboard_missing_token_does_not_count_toward_throttle() {
+    init_tracing();
+    let server = TestServer::start().await;
+    let base = format!("http://127.0.0.1:{}", server.dashboard_port);
+    let client = insecure_http_client();
+    let budget = server.config.auth.max_failed_auth_per_minute;
+
+    for _ in 0..(budget + 5) {
+        let resp = client
+            .get(format!("{base}/api/tunnels"))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 401);
+    }
+
+    let resp = client
+        .get(format!("{base}/api/tunnels"))
+        .header("Authorization", format!("Bearer {}", server.admin_token))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200, "admin token must still work");
+}

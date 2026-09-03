@@ -367,6 +367,8 @@ impl TestServer {
             auth: AuthSection {
                 admin_token: admin_token.to_string(),
                 require_auth,
+                // Shipped default; the throttle tests in `auth.rs` count on it.
+                max_failed_auth_per_minute: 10,
             },
             database: DatabaseSection {
                 url: pg_url,
@@ -422,6 +424,7 @@ impl TestServer {
             config.limits.max_tunnels_per_session,
             config.limits.max_connections_per_tunnel,
             config.limits.ip_rate_limit_rps,
+            config.auth.max_failed_auth_per_minute,
         ));
 
         let (capture_tx, capture_rx) = mpsc::channel(256);

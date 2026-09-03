@@ -20,6 +20,7 @@ use super::tunnel::{
     ControlMessage, GroupAlertPayload, GroupMember, GroupSpec, SessionInfo, TcpTunnelEvent,
     TunnelGroup, TunnelInfo, UdpTunnelEvent, ZeroHealthyAlert,
 };
+use crate::auth::AuthFailureLimiter;
 
 /// Broadcast channel capacity for TCP/UDP tunnel lifecycle events.
 const TCP_EVENT_CAPACITY: usize = 64;
@@ -84,6 +85,9 @@ pub struct TunnelCore {
     pub rate_limiter: Arc<RateLimiter>,
     /// Per-source-IP sliding-window rate limiter.
     pub ip_limiter: Arc<IpRateLimiter>,
+    /// Per-source-IP throttle on failed authentication attempts (control-plane
+    /// handshake and dashboard API). See [`crate::auth::AuthFailureLimiter`].
+    pub auth_limiter: Arc<AuthFailureLimiter>,
     /// Broadcast channel for `GroupEvent`s emitted on every member health
     /// transition. Drives the SSE endpoint
     /// `GET /api/groups/:label/events`. A lagged subscriber gets a
@@ -140,6 +144,7 @@ impl TunnelCore {
         max_tunnels_per_session: usize,
         max_connections_per_tunnel: usize,
         ip_rate_limit_rps: u32,
+        max_failed_auth_per_minute: u32,
     ) -> Self {
         let [tcp_low, tcp_high] = tcp_port_range;
         let tcp_ports: Vec<u16> = (tcp_low..=tcp_high).collect();
@@ -169,6 +174,7 @@ impl TunnelCore {
             udp_events,
             rate_limiter: Arc::new(RateLimiter::new()),
             ip_limiter: Arc::new(IpRateLimiter::new(ip_rate_limit_rps)),
+            auth_limiter: Arc::new(AuthFailureLimiter::new(max_failed_auth_per_minute)),
             group_events,
         }
     }
@@ -1096,7 +1102,7 @@ mod tests {
     use super::*;
 
     fn make_core() -> TunnelCore {
-        TunnelCore::new([20000, 20009], [0, 0], 5, 100, 1000)
+        TunnelCore::new([20000, 20009], [0, 0], 5, 100, 1000, 10)
     }
 
     fn dummy_session(core: &TunnelCore) -> (Uuid, mpsc::Receiver<ControlMessage>) {
@@ -1228,7 +1234,7 @@ mod tests {
 
     #[test]
     fn remove_tcp_tunnel_returns_port_to_pool() {
-        let core = TunnelCore::new([30000, 30000], [0, 0], 5, 100, 1000); // single-port range
+        let core = TunnelCore::new([30000, 30000], [0, 0], 5, 100, 1000, 10); // single-port range
         let (session_id, _rx) = dummy_session(&core);
 
         let (tunnel_id, port) = core.register_tcp_tunnel(&session_id, None).unwrap();
@@ -1251,7 +1257,7 @@ mod tests {
 
     #[test]
     fn no_ports_available_error() {
-        let core = TunnelCore::new([40000, 40000], [0, 0], 10, 100, 1000);
+        let core = TunnelCore::new([40000, 40000], [0, 0], 10, 100, 1000, 10);
         let (sid1, _rx1) = dummy_session(&core);
         let (sid2, _rx2) = dummy_session(&core);
 
@@ -1337,7 +1343,7 @@ mod tests {
 
     #[test]
     fn tunnel_limit_is_enforced() {
-        let core = TunnelCore::new([50000, 50009], [0, 0], 2, 100, 1000);
+        let core = TunnelCore::new([50000, 50009], [0, 0], 2, 100, 1000, 10);
         let (session_id, _rx) = dummy_session(&core);
 
         core.register_http_tunnel(&session_id, None, TunnelProtocol::Http, None)
@@ -1921,7 +1927,7 @@ mod tests {
     /// the *last* leave evicts everything and returns the port to the pool.
     #[test]
     fn tcp_group_removing_one_of_two_keeps_port_allocated() {
-        let core = TunnelCore::new([60000, 60001], [0, 0], 5, 100, 1000);
+        let core = TunnelCore::new([60000, 60001], [0, 0], 5, 100, 1000, 10);
         let (sid_a, _rx_a) = dummy_session(&core);
         let (sid_b, _rx_b) = dummy_session(&core);
         let mut events = core.subscribe_tcp_events();
@@ -1994,7 +2000,7 @@ mod tests {
     /// solo path).
     #[test]
     fn tcp_group_first_registration_respects_port_pool() {
-        let core = TunnelCore::new([60100, 60100], [0, 0], 5, 100, 1000);
+        let core = TunnelCore::new([60100, 60100], [0, 0], 5, 100, 1000, 10);
         let (sid_a, _rx_a) = dummy_session(&core);
         let (sid_b, _rx_b) = dummy_session(&core);
 

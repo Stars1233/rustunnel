@@ -472,6 +472,8 @@ acme_enabled = false
 # Generate: openssl rand -hex 32
 admin_token  = "your-admin-token-here"
 require_auth = true
+# Failed auth attempts per source IP per minute before rejection (0 = off).
+max_failed_auth_per_minute = 10
 
 # ── Database ─────────────────────────────────────────────────────────────────
 [database]
@@ -938,6 +940,7 @@ curl -s -X POST https://your-server:8443/api/tokens \
 | `tls.cloudflare_zone_id` | string | `""` | Cloudflare Zone ID (prefer env var `CLOUDFLARE_ZONE_ID`) |
 | `auth.admin_token` | string | — | Master auth token |
 | `auth.require_auth` | bool | — | Reject unauthenticated clients |
+| `auth.max_failed_auth_per_minute` | int | `10` | Failed auth attempts allowed per source IP per minute before further attempts are rejected (control-plane handshake and dashboard API); `0` disables |
 | `database.url` | string | — | PostgreSQL connection URL (required) |
 | `database.captured_path` | string | `/var/lib/rustunnel/captured.db` | Per-region SQLite file for captured HTTP request bodies |
 | `server.dashboard_origin` | string | `""` | Allowed CORS origin for the dashboard UI (e.g. `http://localhost:3000`) |

@@ -76,6 +76,10 @@ cloudflare_zone_id   = ""
 # TODO: replace with a real secret before starting the service.
 admin_token  = ""
 require_auth = true
+# Failed authentication attempts allowed per source IP per minute before the
+# server rejects further attempts outright (control-plane handshake and
+# dashboard API). 0 disables the throttle.
+max_failed_auth_per_minute = 10
 
 # ── Database ──────────────────────────────────────────────────────────────────
 [database]

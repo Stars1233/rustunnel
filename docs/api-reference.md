@@ -34,9 +34,15 @@ Tunnels and groups the caller can't see return **404 Not Found** rather than `40
 **Error responses**
 
 ```json
-{ "error": "missing token" }      // 401 — no Authorization header
-{ "error": "invalid token" }      // 401 — token not recognised
+{ "error": "missing token" }               // 401 — no Authorization header
+{ "error": "invalid token" }               // 401 — token not recognised
+{ "error": "too many failed auth attempts" } // 429 — source IP over its failed-attempt budget
 ```
+
+Failed bearer checks are throttled per source IP: after `auth.max_failed_auth_per_minute`
+rejections (default `10`) within a minute, further requests carrying an `Authorization`
+header from that IP get **429 Too Many Requests** until the window slides. The admin token
+is compared in constant time, and the same throttle protects the control-plane `Auth` handshake.
 
 ---
 

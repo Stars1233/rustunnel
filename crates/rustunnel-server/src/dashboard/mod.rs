@@ -91,6 +91,11 @@ pub async fn run_dashboard(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "dashboard listening");
 
-    axum::serve(listener, app).await?;
+    // `ConnectInfo` is required by the failed-auth throttle (`api::auth_throttle`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
