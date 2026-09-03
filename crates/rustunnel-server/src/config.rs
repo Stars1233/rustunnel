@@ -201,6 +201,15 @@ pub struct AuthSection {
     pub admin_token: String,
     /// When true every client must present a valid auth token
     pub require_auth: bool,
+    /// Failed authentication attempts allowed per source IP per minute before
+    /// further attempts are rejected outright (0 = disabled). Applies to the
+    /// control-plane `Auth` handshake and the dashboard API bearer check.
+    #[serde(default = "default_max_failed_auth_per_minute")]
+    pub max_failed_auth_per_minute: u32,
+}
+
+fn default_max_failed_auth_per_minute() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -339,6 +348,7 @@ impl Default for ServerConfig {
             auth: AuthSection {
                 admin_token: "test-admin-token".to_string(),
                 require_auth: false,
+                max_failed_auth_per_minute: 10,
             },
             database: DatabaseSection {
                 url: std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {

@@ -20,14 +20,17 @@
 //! | DELETE | /api/tokens/:id                                | Delete a token                     |
 //! | GET    | /api/history                                   | Paginated tunnel history           |
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -35,6 +38,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 
 use crate::audit::{AuditEvent, AuditTx};
+use crate::auth::{client_ip, secret_eq};
 use crate::config::RegionSection;
 use crate::core::TunnelCore;
 use crate::dashboard::capture::{load_requests_from_db, CaptureStore};
@@ -96,7 +100,55 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/admin/users/:id/tunnels", get(admin_list_user_tunnels))
         .route("/api/admin/users/:id/tokens", get(admin_list_user_tokens))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(state.clone(), auth_throttle))
         .with_state(state)
+}
+
+// ── failed-auth throttle ──────────────────────────────────────────────────────
+
+/// Throttle failed bearer-token attempts per client IP.
+///
+/// Wraps every `/api` route. Requests without an `Authorization` header pass
+/// straight through (public endpoints; a missing token is not a guess). For
+/// the rest, a client over its failed-attempt budget gets `429` before any
+/// handler runs — and therefore before the admin token is ever compared —
+/// and every `401` response records one failure against that client.
+///
+/// The client address comes from [`ConnectInfo`], so the router must be served
+/// with `into_make_service_with_connect_info` (see `dashboard::run_dashboard`);
+/// without it the throttle is a no-op. Behind nginx the loopback peer's
+/// `X-Real-IP` is honoured — see [`client_ip`].
+async fn auth_throttle(State(state): State<ApiState>, req: Request, next: Next) -> Response {
+    if !req.headers().contains_key(AUTHORIZATION) {
+        return next.run(req).await;
+    }
+    let Some(peer) = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+    else {
+        return next.run(req).await;
+    };
+    let ip = client_ip(
+        peer,
+        req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()),
+    );
+
+    if state.core.auth_limiter.is_limited(ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrBody {
+                error: "too many failed auth attempts".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let resp = next.run(req).await;
+    if resp.status() == StatusCode::UNAUTHORIZED {
+        state.core.auth_limiter.record_failure(ip);
+    }
+    resp
 }
 
 // ── auth helper ───────────────────────────────────────────────────────────────
@@ -161,7 +213,7 @@ async fn require_auth(
     }
 
     // Check admin token first (avoids DB hit for the most common case).
-    if auth == state.admin_token {
+    if secret_eq(auth, &state.admin_token) {
         return Ok(AuthScope::Admin);
     }
 
@@ -1277,7 +1329,7 @@ async fn create_token(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t == state.admin_token)
+        .map(|t| secret_eq(t, &state.admin_token))
         .unwrap_or(false);
 
     match db::create_token(&state.db.pg, &body.label, body.scope.as_deref()).await {
@@ -1319,7 +1371,7 @@ async fn delete_token(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t == state.admin_token)
+        .map(|t| secret_eq(t, &state.admin_token))
         .unwrap_or(false);
 
     match db::delete_token(&state.db.pg, &id).await {
@@ -1353,7 +1405,7 @@ async fn require_admin(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if auth == state.admin_token {
+    if secret_eq(auth, &state.admin_token) {
         Ok(())
     } else {
         Err(unauthorized("admin token required"))

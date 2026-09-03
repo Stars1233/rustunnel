@@ -35,6 +35,7 @@ axum = { version = "0.7", features = ["macros"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "uuid", "chrono", "migrate"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "set-header"] }
 sha2 = "0.10"
+subtle = "2"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -127,6 +127,7 @@ async fn run(config: Arc<ServerConfig>) -> Result<()> {
         config.limits.max_tunnels_per_session,
         config.limits.max_connections_per_tunnel,
         config.limits.ip_rate_limit_rps,
+        config.auth.max_failed_auth_per_minute,
     ));
 
     // ── TLS certificate manager ───────────────────────────────────────────────
